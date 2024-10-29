@@ -4,22 +4,29 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="styles.css">
-    <title>QuickBite</title>
+    <title>QuickBite - AI Recipe Assistant</title>
 </head>
 <body>
     <header>
-        <h1>QuickBite</h1>
-        <p>Your AI Recipe Assistant</p>
+        <div class="container">
+            <h1>QuickBite</h1>
+            <p>Your AI Recipe Assistant</p>
+        </div>
     </header>
     <main>
-        <div class="input-container">
-            <input type="text" id="ingredients" placeholder="Enter ingredients...">
-            <button id="getRecipes">Get Recipes</button>
+        <div class="container">
+            <div class="input-container">
+                <input type="text" id="ingredients" placeholder="Enter ingredients (e.g., chicken, tomato)">
+                <button id="getRecipes">Get Recipes</button>
+            </div>
+            <div id="recipeResults" class="recipe-results"></div>
         </div>
-        <div id="recipeResults" class="recipe-results"></div>
     </main>
     <footer>
-        <p>&copy; 2024 QuickBite. All rights reserved.</p>
+        <div class="container">
+            <p>&copy; 2024 QuickBite. All rights reserved.</p>
+            <p>Follow us on <a href="#">Twitter</a> | <a href="#">Facebook</a></p>
+        </div>
     </footer>
     <script src="script.js"></script>
 </body>
