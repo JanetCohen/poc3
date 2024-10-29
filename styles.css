@@ -14,26 +14,39 @@ body {
 
 /* Header */
 header {
-    background-color: #007BFF;
+    position: relative;
+    overflow: hidden;
+}
+
+.hero {
+    background-image: url('your-image-url.jpg'); /* Ganti dengan URL gambar latar belakang Anda */
+    background-size: cover;
+    background-position: center;
+    height: 400px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
     color: white;
-    padding: 20px 0;
     text-align: center;
+    padding: 20px;
 }
 
-header h1 {
-    margin-bottom: 10px;
-    font-size: 2.5em;
+.hero h1 {
+    font-size: 3.5em;
+    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.7);
 }
 
-header p {
-    font-size: 1.2em;
+.hero p {
+    font-size: 1.5em;
+    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.7);
 }
 
 /* Main Content */
 .container {
     width: 90%;
     max-width: 800px;
-    margin: 20px auto;
+    margin: -80px auto 20px auto; /* Menambahkan margin negatif untuk mengangkat konten */
     padding: 20px;
     background: white;
     border-radius: 8px;
