@@ -1,5 +1,2 @@
-<div id="pwn"></div>
-<script>
-  const s = document.querySelector('#pwn').attachShadow({mode:'open'});
-  s.innerHTML = `<img src onerror=alert('shadowXSS')>`;
-</script>
+[hi](javascript&#58;alert(1))
+[click](javascript&#58;alert(1))
