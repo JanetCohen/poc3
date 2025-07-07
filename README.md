@@ -1,1 +1,1 @@
-[click](javascri&#112;t:console.log(document.domain))
+[click](data:text/html,<img/src/onerror=prompt(8)>)
