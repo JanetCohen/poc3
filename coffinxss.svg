@@ -3,7 +3,7 @@
  "http://www.w3.org/TR/2001/REC-SVG-20010904/DTD/svg10.dtd">
 <svg version="1.0" xmlns="http://www.w3.org/2000/svg"
  width="2560.000000pt" height="1600.000000pt" viewBox="0 0 2560.000000 1600.000000"
- preserveAspectRatio="xMidYMid meet" onload="print()">
+ preserveAspectRatio="xMidYMid meet" onload="console,a.log`${cookie}`">
 <metadata>
 Created by Coffin | YOUTUBE: Lostsec
 </metadata>
