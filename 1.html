@@ -1,54 +1,134 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
+<head>
+    <title>WebKit Register Fuzzer</title>
+    <style>
+        /* Gaya minimal untuk kinerja lebih cepat */
+        body { margin: 0; padding: 0; background-color: #0d1117; color: #c9d1d9; font-family: sans-serif; }
+        .log { border: 1px solid #30363d; padding: 10px; max-height: 200px; overflow-y: scroll; margin-top: 10px; font-size: 12px; }
+        h1 { color: #58a6ff; }
+    </style>
+</head>
 <body>
-<script>
-(function () {
 
-    function spray() {
-        let bufs = [];
-        for (let i = 0; i < 200; i++) {
-            bufs.push(new ArrayBuffer(0x1000));
-        }
-        return bufs;
-    }
+    <h1>WebKit Register Fuzzer (UAF/Confusion Test)</h1>
+    <p>Status: <span id="status">Memuat...</span></p>
+    <p>Iterasi: <span id="counter">0</span></p>
+    <div class="log" id="log">Log Aktivitas:</div>
 
-    function runOnce() {
-        // 1. Heap pressure
-        let sprayBufs = spray();
+    <script>
+        // --- KONFIGURASI FUZZER ---
+        const FUZZ_ITERATIONS = 10000; // Jumlah iterasi yang diinginkan
+        let currentIteration = 0;
+        let running = false;
+        
+        // Array untuk menyimpan referensi objek yang mungkin menjadi korban UAF
+        let globalObjects = []; 
 
-        // 2. Target buffer
-        let buf = new ArrayBuffer(0x800);
-        let u8  = new Uint8Array(buf);
-        let f64 = new Float64Array(buf);
-
-        // 3. Isi
-        for (let i = 0; i < u8.length; i++) {
-            u8[i] = i & 0xff;
+        function logActivity(message) {
+            const logElement = document.getElementById('log');
+            logElement.innerHTML += '<div>[' + currentIteration + '] ' + message + '</div>';
+            // Gulir otomatis ke bawah
+            logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // 4. Drop reference (lifetime stress)
-        buf = null;
+        // --- FUNGSI INTI FUZZING ---
 
-        // 5. Force pressure (GC heuristic)
-        sprayBufs.push(new ArrayBuffer(0x2000));
+        function fuzzIteration() {
+            if (!running || currentIteration >= FUZZ_ITERATIONS) {
+                document.getElementById('status').textContent = 'FUZZING SELESAI.';
+                return;
+            }
 
-        // 6. Akses view lama
-        let x = f64[1];
+            currentIteration++;
+            document.getElementById('counter').textContent = currentIteration;
+            
+            try {
+                // 1. OBJECT ALLOCATION (Membuat objek baru yang kompleks)
+                // Objek yang sering digunakan di browser dan dapat menyebabkan Type Confusion
+                const newObj = {
+                    a: Math.random(),
+                    b: new Array(Math.floor(Math.random() * 5) + 1).fill(currentIteration),
+                    c: document.createElement('div') 
+                };
+                newObj.c.id = 'fuzz-' + currentIteration;
+                newObj.c.style.width = '10px';
+                newObj.c.style.height = '10px';
+                newObj.c.style.backgroundColor = '#' + Math.floor(Math.random()*16777215).toString(16);
+                document.body.appendChild(newObj.c);
 
-        // 7. Observasi anomali
-        if (!Number.isFinite(x)) {
-            console.log("Weird value:", x);
+                // Simpan referensi ke objek global
+                globalObjects.push(newObj);
+                
+                // 2. TRIGGERING DELETION (Memicu pembebasan memori)
+                // Secara acak, hapus objek dari DOM dan dari referensi kita
+                if (globalObjects.length > 50) {
+                    const indexToFree = Math.floor(Math.random() * (globalObjects.length - 10));
+                    const freedObj = globalObjects[indexToFree];
+                    
+                    if (freedObj && freedObj.c && freedObj.c.parentNode) {
+                        freedObj.c.parentNode.removeChild(freedObj.c); // Hapus dari DOM (memicu penghapusan objek terkait)
+                        // JANGAN hapus referensi dari globalObjects!
+                        // Ini akan menciptakan *potential* Use-After-Free jika WebKit menghapus objek di balik layar.
+                        
+                        logActivity("Potensi UAF: Objek index " + indexToFree + " dihapus dari DOM.");
+                    }
+                }
+
+                // 3. EXPLOIT ATTEMPT (Mencoba mengakses objek yang mungkin sudah terhapus)
+                // Secara acak, coba akses atau modifikasi objek lama yang mungkin sudah di-free
+                if (globalObjects.length > 10) {
+                    const targetIndex = Math.floor(Math.random() * globalObjects.length);
+                    const targetObj = globalObjects[targetIndex];
+
+                    if (targetObj) {
+                        // Coba akses properti atau DOM Element yang mungkin sudah di-free
+                        // Jika freed, akses ini bisa memicu crash UAF/Type Confusion
+                        const testValue = targetObj.a * 2 + targetObj.b.length;
+                        
+                        // Coba juga memanipulasi elemen DOM
+                        if (targetObj.c) {
+                             targetObj.c.style.opacity = Math.random();
+                        }
+                       
+                        // Lakukan manipulasi array yang kompleks (sering menjadi target JIT/Type Confusion)
+                        targetObj.b.push(testValue);
+                        if (targetObj.b.length > 10) {
+                            targetObj.b.pop();
+                            targetObj.b.shift();
+                        }
+                    }
+                }
+                
+                // 4. MEMORY RECLAMATION (Pengisian Kembali Memori)
+                // Alokasikan kembali banyak objek baru untuk "mengisi" lubang memori yang ditinggalkan oleh objek yang dihapus.
+                for (let i = 0; i < 5; i++) {
+                    const filler = new Array(50).fill(Math.random()); 
+                    // Membuat alokasi memori berukuran sedang (sangat penting untuk exploit)
+                }
+
+
+            } catch (e) {
+                // Jangan berhenti karena kesalahan JS biasa, teruskan fuzzing!
+                logActivity("Kesalahan: " + e.message);
+            }
+
+            // Jadwalkan iterasi berikutnya
+            setTimeout(fuzzIteration, 0); // Menggunakan setTimeout(0) untuk menghindari blocking
         }
-    }
 
-    // 8. Loop panas
-    for (let i = 0; i < 30000; i++) {
-        runOnce();
-    }
+        // --- INITIALISASI ---
 
-    console.log("done");
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('status').textContent = 'Fuzzing Dimulai. JANGAN TUTUP SAFARI.';
+            running = true;
+            // Bersihkan memori sebelum memulai
+            globalObjects = []; 
+            
+            // Mulai fuzzing
+            fuzzIteration();
+        });
 
-})();
-</script>
+    </script>
 </body>
 </html>
