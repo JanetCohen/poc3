@@ -1,19 +1,24 @@
 <!DOCTYPE html>
 <html>
+<head>
+<style>
+    /* Mencoba memicu rekursi atau overflow pada parser CSS */
+    :root {
+        --prop: var(--prop); /* Circular reference */
+        content: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; 
+    }
+    div {
+        /* String yang sangat panjang untuk menguji alokasi buffer */
+        background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxtYXJrZXI+PHBhdGggZD0iTTAgMGgxMHYxMEgwTTAgMHoiLz48L21hcmtlcj48L3N2Zz4=");
+        border: 1000vw solid blue;
+        transform: rotate(999999deg) scale(999999);
+    }
+</style>
+</head>
 <body>
-    <script>
-        // Membuat 10.000 div bersarang secara otomatis
-        let root = document.createElement('div');
-        let current = root;
-        for (let i = 0; i < 10000; i++) {
-            let next = document.createElement('div');
-            next.setAttribute('id', 'node_' + i);
-            current.appendChild(next);
-            current = next;
-        }
-        document.body.appendChild(root);
-        console.log("Struktur 10.000 level berhasil dibuat.");
-    </script>
+    <div><div><div><div><div><div><div><div><div><div>
+    <div><div><div><div><div><div><div><div><div><div>
+    <h1>Pratinjau Pengujian ASB</h1>
+    <p>Jika pratinjau ini putih atau tertutup sendiri, periksa logs.</p>
 </body>
 </html>
-
