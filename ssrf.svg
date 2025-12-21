@@ -1,4 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200">
-  <image height="30" width="30" xlink:href="	https://webhook.site/5a271c23-c937-4cb6-be4b-d4454fcfae31" />
-  <text x="0" y="20" font-size="20">SSRF P</text>
+<svg width="200" height="200" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <rect width="100%" height="100%" fill="white" />
+  
+  <rect x="10" y="10" width="50" height="50" fill="red" />
+  <rect x="60" y="10" width="50" height="50" fill="blue" />
+  
+  <image x="0" y="0" width="1" height="1" 
+         xlink:href="https://webhook.site/5a271c23-c937-4cb6-be4b-d4454fcfae31" 
+         style="image-rendering: pixelated;" />
+
+  <text x="10" y="150" font-family="Arial" font-size="15" fill="black">IMG_PROCESS_01</text>
 </svg>
