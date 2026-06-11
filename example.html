@@ -1,27 +1,61 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>HTML Injection PoC</title>
+<meta charset="UTF-8">
+<title>HTML Injection PoC</title>
+<style>
+    html, body {
+        margin: 0;
+        padding: 0;
+        min-height: 100vh;
+        background: #0f172a;
+        color: white;
+        font-family: Arial, sans-serif;
+    }
+
+    .container {
+        margin: 40px auto;
+        max-width: 700px;
+        background: #1e293b;
+        border: 4px solid red;
+        border-radius: 12px;
+        padding: 30px;
+        box-shadow: 0 0 20px rgba(255, 0, 0, 0.4);
+    }
+
+    h1 {
+        color: #ff4d4d;
+    }
+
+    code {
+        background: #334155;
+        padding: 2px 6px;
+        border-radius: 4px;
+    }
+</style>
 </head>
 <body>
-    <div style="border: 2px solid red; padding: 20px; margin: 20px;">
+    <div class="container">
         <h1>HTML Injection Demonstration</h1>
 
         <p>
-            This content was injected into the application's rendered output,
-            indicating that user-controlled HTML is being interpreted by the browser.
+            This content is rendered from user-controlled HTML input.
+        </p>
+
+        <p>
+            The application interpreted HTML elements instead of displaying them as plain text.
         </p>
 
         <ul>
-            <li>Injected heading</li>
-            <li>Injected list item</li>
-            <li>Injected formatting elements</li>
+            <li>Custom heading rendered</li>
+            <li>Custom styles applied</li>
+            <li>User-controlled markup executed by the browser</li>
         </ul>
 
-        <blockquote>
-            The application does not appear to properly sanitize or encode
-            HTML input before rendering it.
-        </blockquote>
+        <p>
+            Payload example:
+            <code>&lt;h1&gt;Injected Content&lt;/h1&gt;</code>
+        </p>
     </div>
 </body>
 </html>
