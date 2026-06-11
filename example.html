@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Injection Diagnostic</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Artifact postMessage Monitor</title>
+
 <style>
     body {
         margin: 0;
@@ -14,101 +16,258 @@
 
     .card {
         background: #1e293b;
-        border: 3px solid #22c55e;
+        border: 2px solid #3b82f6;
         border-radius: 12px;
         padding: 20px;
         margin-bottom: 20px;
     }
 
-    h1 {
-        margin-top: 0;
-    }
-
-    .status {
-        padding: 8px;
-        margin-top: 10px;
-        border-radius: 6px;
-        background: #334155;
-    }
-
     button {
         padding: 10px 15px;
-        font-size: 16px;
+        margin: 5px;
         cursor: pointer;
+        border: none;
+        border-radius: 6px;
+        font-weight: bold;
     }
 
+    .blue { background: #2563eb; color: white; }
+    .green { background: #16a34a; color: white; }
+    .red { background: #dc2626; color: white; }
+
     pre {
-        white-space: pre-wrap;
-        word-wrap: break-word;
         background: #020617;
-        padding: 15px;
+        border: 1px solid #334155;
         border-radius: 8px;
+        padding: 15px;
+        overflow: auto;
+        max-height: 400px;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    td {
+        padding: 8px;
+        border-bottom: 1px solid #334155;
     }
 </style>
 </head>
+
 <body>
 
 <div class="card">
-    <h1>Injection Diagnostic</h1>
-    <p>This page is intended to classify the behavior of rendered user-controlled content.</p>
-
-    <div id="results"></div>
-</div>
-
-<div class="card">
-    <h2>Event Handler Test</h2>
-
-    <img src="invalid-image"
-         alt="test"
-         onerror="document.getElementById('event-status').textContent='✓ Event handler executed';">
-
-    <div id="event-status" class="status">
-        Waiting...
-    </div>
-</div>
-
-<div class="card">
-    <h2>User Interaction Test</h2>
-
-    <button onclick="document.getElementById('click-status').textContent='✓ Click handler executed';">
-        Click Me
-    </button>
-
-    <div id="click-status" class="status">
-        Waiting...
-    </div>
+    <h1>Artifact Security Monitor</h1>
+    <p>Diagnostic page for observing postMessage behavior.</p>
 </div>
 
 <div class="card">
     <h2>Environment Information</h2>
 
-    <pre id="env"></pre>
+    <table>
+        <tr>
+            <td>location.origin</td>
+            <td id="origin"></td>
+        </tr>
+
+        <tr>
+            <td>document.domain</td>
+            <td id="domain"></td>
+        </tr>
+
+        <tr>
+            <td>window.top === window</td>
+            <td id="frame"></td>
+        </tr>
+
+        <tr>
+            <td>document.cookie.length</td>
+            <td id="cookie"></td>
+        </tr>
+
+        <tr>
+            <td>localStorage.length</td>
+            <td id="local"></td>
+        </tr>
+
+        <tr>
+            <td>sessionStorage.length</td>
+            <td id="session"></td>
+        </tr>
+
+        <tr>
+            <td>parent.location.origin</td>
+            <td id="parent-origin"></td>
+        </tr>
+    </table>
+</div>
+
+<div class="card">
+    <h2>postMessage Tests</h2>
+
+    <button class="blue" onclick="sendPing()">
+        Send Ping
+    </button>
+
+    <button class="green" onclick="sendHello()">
+        Send Hello
+    </button>
+
+    <button class="red" onclick="clearLog()">
+        Clear Log
+    </button>
+</div>
+
+<div class="card">
+    <h2>Event Log</h2>
+
+    <pre id="log"></pre>
 </div>
 
 <script>
-(function() {
-    const results = document.getElementById("results");
-    const env = document.getElementById("env");
 
-    function add(msg) {
-        const div = document.createElement("div");
-        div.className = "status";
-        div.textContent = msg;
-        results.appendChild(div);
+const logBox = document.getElementById("log");
 
-        console.log(msg);
+function addLog(msg) {
+
+    const time = new Date().toLocaleTimeString();
+
+    const line = `[${time}] ${msg}\n`;
+
+    console.log(msg);
+
+    logBox.textContent += line;
+
+    logBox.scrollTop = logBox.scrollHeight;
+}
+
+function clearLog() {
+
+    logBox.textContent = "";
+
+    addLog("Log cleared.");
+}
+
+/* ENVIRONMENT */
+
+document.getElementById("origin").textContent =
+    location.origin;
+
+document.getElementById("domain").textContent =
+    document.domain;
+
+document.getElementById("frame").textContent =
+    (window.top === window);
+
+document.getElementById("cookie").textContent =
+    document.cookie.length;
+
+document.getElementById("local").textContent =
+    localStorage.length;
+
+document.getElementById("session").textContent =
+    sessionStorage.length;
+
+/* PARENT ORIGIN TEST */
+
+try {
+
+    document.getElementById("parent-origin").textContent =
+        parent.location.origin;
+
+} catch (e) {
+
+    document.getElementById("parent-origin").textContent =
+        "Blocked by SOP";
+}
+
+/* RECEIVE */
+
+window.addEventListener("message", function(event) {
+
+    addLog("MESSAGE RECEIVED");
+
+    addLog("Origin: " + event.origin);
+
+    try {
+
+        addLog("Data: " +
+            JSON.stringify(event.data));
+
+    } catch {
+
+        addLog("Data: " +
+            String(event.data));
     }
 
-    add("✓ HTML rendered successfully");
+});
 
-    env.textContent =
-        "location.origin: " + location.origin + "\n" +
-        "document.domain: " + document.domain + "\n" +
-        "window.top === window: " + (window.top === window) + "\n" +
-        "document.cookie length: " + document.cookie.length + "\n" +
-        "localStorage length: " + localStorage.length + "\n" +
-        "sessionStorage length: " + sessionStorage.length;
-})();
+/* SEND */
+
+function sendPing() {
+
+    const payload = {
+
+        type: "artifact_ping",
+
+        timestamp: Date.now()
+    };
+
+    parent.postMessage(payload, "*");
+
+    addLog("PING SENT");
+
+    addLog(JSON.stringify(payload));
+}
+
+function sendHello() {
+
+    const payload = {
+
+        type: "artifact_hello",
+
+        source: location.origin,
+
+        timestamp: Date.now()
+    };
+
+    parent.postMessage(payload, "*");
+
+    addLog("HELLO SENT");
+
+    addLog(JSON.stringify(payload));
+}
+
+/* HEARTBEAT */
+
+setInterval(function() {
+
+    const payload = {
+
+        type: "artifact_heartbeat",
+
+        timestamp: Date.now()
+    };
+
+    parent.postMessage(payload, "*");
+
+    addLog("HEARTBEAT SENT");
+
+}, 15000);
+
+/* START */
+
+addLog("Monitor started.");
+
+addLog("Origin: " + location.origin);
+
+addLog("Top window: " +
+    (window.top === window));
+
 </script>
 
 </body>
