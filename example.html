@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Artifact postMessage Monitor</title>
+<title>Artifact Handshake Monitor</title>
 
 <style>
     body {
@@ -25,15 +25,16 @@
     button {
         padding: 10px 15px;
         margin: 5px;
-        cursor: pointer;
         border: none;
         border-radius: 6px;
+        cursor: pointer;
         font-weight: bold;
     }
 
-    .blue { background: #2563eb; color: white; }
-    .green { background: #16a34a; color: white; }
-    .red { background: #dc2626; color: white; }
+    .clear {
+        background: #dc2626;
+        color: white;
+    }
 
     pre {
         background: #020617;
@@ -41,7 +42,7 @@
         border-radius: 8px;
         padding: 15px;
         overflow: auto;
-        max-height: 400px;
+        max-height: 500px;
         white-space: pre-wrap;
         word-break: break-word;
     }
@@ -61,12 +62,12 @@
 <body>
 
 <div class="card">
-    <h1>Artifact Security Monitor</h1>
-    <p>Diagnostic page for observing postMessage behavior.</p>
+    <h1>Artifact Handshake Monitor</h1>
+    <p>Observing parent ↔ iframe messaging behavior.</p>
 </div>
 
 <div class="card">
-    <h2>Environment Information</h2>
+    <h2>Environment</h2>
 
     <table>
         <tr>
@@ -107,17 +108,7 @@
 </div>
 
 <div class="card">
-    <h2>postMessage Tests</h2>
-
-    <button class="blue" onclick="sendPing()">
-        Send Ping
-    </button>
-
-    <button class="green" onclick="sendHello()">
-        Send Hello
-    </button>
-
-    <button class="red" onclick="clearLog()">
+    <button class="clear" onclick="clearLog()">
         Clear Log
     </button>
 </div>
@@ -129,16 +120,15 @@
 </div>
 
 <script>
-
 const logBox = document.getElementById("log");
 
-function addLog(msg) {
+function addLog(message) {
 
     const time = new Date().toLocaleTimeString();
 
-    const line = `[${time}] ${msg}\n`;
+    const line = `[${time}] ${message}\n`;
 
-    console.log(msg);
+    console.log(message);
 
     logBox.textContent += line;
 
@@ -152,7 +142,7 @@ function clearLog() {
     addLog("Log cleared.");
 }
 
-/* ENVIRONMENT */
+/* Environment */
 
 document.getElementById("origin").textContent =
     location.origin;
@@ -172,20 +162,18 @@ document.getElementById("local").textContent =
 document.getElementById("session").textContent =
     sessionStorage.length;
 
-/* PARENT ORIGIN TEST */
-
 try {
 
     document.getElementById("parent-origin").textContent =
         parent.location.origin;
 
-} catch (e) {
+} catch {
 
     document.getElementById("parent-origin").textContent =
         "Blocked by SOP";
 }
 
-/* RECEIVE */
+/* Handshake Monitor */
 
 window.addEventListener("message", function(event) {
 
@@ -204,62 +192,32 @@ window.addEventListener("message", function(event) {
             String(event.data));
     }
 
+    /* Observe registerAsChildFrame */
+
+    if (
+        event.data &&
+        typeof event.data === "object" &&
+        event.data.command === "registerAsChildFrame"
+    ) {
+
+        addLog("registerAsChildFrame detected");
+
+        const ack = {
+
+            command: "registerAsChildFrameAck",
+
+            remoteFrameId: event.data.remoteFrameId
+        };
+
+        parent.postMessage(ack, "*");
+
+        addLog("ACK SENT");
+
+        addLog(JSON.stringify(ack));
+    }
 });
 
-/* SEND */
-
-function sendPing() {
-
-    const payload = {
-
-        type: "artifact_ping",
-
-        timestamp: Date.now()
-    };
-
-    parent.postMessage(payload, "*");
-
-    addLog("PING SENT");
-
-    addLog(JSON.stringify(payload));
-}
-
-function sendHello() {
-
-    const payload = {
-
-        type: "artifact_hello",
-
-        source: location.origin,
-
-        timestamp: Date.now()
-    };
-
-    parent.postMessage(payload, "*");
-
-    addLog("HELLO SENT");
-
-    addLog(JSON.stringify(payload));
-}
-
-/* HEARTBEAT */
-
-setInterval(function() {
-
-    const payload = {
-
-        type: "artifact_heartbeat",
-
-        timestamp: Date.now()
-    };
-
-    parent.postMessage(payload, "*");
-
-    addLog("HEARTBEAT SENT");
-
-}, 15000);
-
-/* START */
+/* Startup */
 
 addLog("Monitor started.");
 
