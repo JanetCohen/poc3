@@ -1,10 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta http-equiv="refresh" content="0; url=https://www.internalfb.com/intern/bug-bounty/get-canary-token/35d16715923742e1a678181921df085c/">
-  <title>Redirecting...</title>
+    <title>HTML Injection PoC</title>
 </head>
 <body>
-  Redirecting to internalfb...
+    <div style="border: 2px solid red; padding: 20px; margin: 20px;">
+        <h1>HTML Injection Demonstration</h1>
+
+        <p>
+            This content was injected into the application's rendered output,
+            indicating that user-controlled HTML is being interpreted by the browser.
+        </p>
+
+        <ul>
+            <li>Injected heading</li>
+            <li>Injected list item</li>
+            <li>Injected formatting elements</li>
+        </ul>
+
+        <blockquote>
+            The application does not appear to properly sanitize or encode
+            HTML input before rendering it.
+        </blockquote>
+    </div>
 </body>
 </html>
