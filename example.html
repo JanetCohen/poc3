@@ -2,60 +2,114 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>HTML Injection PoC</title>
+<title>Injection Diagnostic</title>
 <style>
-    html, body {
+    body {
         margin: 0;
-        padding: 0;
-        min-height: 100vh;
+        padding: 20px;
+        font-family: Arial, sans-serif;
         background: #0f172a;
         color: white;
-        font-family: Arial, sans-serif;
     }
 
-    .container {
-        margin: 40px auto;
-        max-width: 700px;
+    .card {
         background: #1e293b;
-        border: 4px solid red;
+        border: 3px solid #22c55e;
         border-radius: 12px;
-        padding: 30px;
-        box-shadow: 0 0 20px rgba(255, 0, 0, 0.4);
+        padding: 20px;
+        margin-bottom: 20px;
     }
 
     h1 {
-        color: #ff4d4d;
+        margin-top: 0;
     }
 
-    code {
+    .status {
+        padding: 8px;
+        margin-top: 10px;
+        border-radius: 6px;
         background: #334155;
-        padding: 2px 6px;
-        border-radius: 4px;
+    }
+
+    button {
+        padding: 10px 15px;
+        font-size: 16px;
+        cursor: pointer;
+    }
+
+    pre {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        background: #020617;
+        padding: 15px;
+        border-radius: 8px;
     }
 </style>
 </head>
 <body>
-    <div class="container">
-        <h1>HTML Injection Demonstration</h1>
 
-        <p>
-            This content is rendered from user-controlled HTML input.
-        </p>
+<div class="card">
+    <h1>Injection Diagnostic</h1>
+    <p>This page is intended to classify the behavior of rendered user-controlled content.</p>
 
-        <p>
-            The application interpreted HTML elements instead of displaying them as plain text.
-        </p>
+    <div id="results"></div>
+</div>
 
-        <ul>
-            <li>Custom heading rendered</li>
-            <li>Custom styles applied</li>
-            <li>User-controlled markup executed by the browser</li>
-        </ul>
+<div class="card">
+    <h2>Event Handler Test</h2>
 
-        <p>
-            Payload example:
-            <code>&lt;h1&gt;Injected Content&lt;/h1&gt;</code>
-        </p>
+    <img src="invalid-image"
+         alt="test"
+         onerror="document.getElementById('event-status').textContent='✓ Event handler executed';">
+
+    <div id="event-status" class="status">
+        Waiting...
     </div>
+</div>
+
+<div class="card">
+    <h2>User Interaction Test</h2>
+
+    <button onclick="document.getElementById('click-status').textContent='✓ Click handler executed';">
+        Click Me
+    </button>
+
+    <div id="click-status" class="status">
+        Waiting...
+    </div>
+</div>
+
+<div class="card">
+    <h2>Environment Information</h2>
+
+    <pre id="env"></pre>
+</div>
+
+<script>
+(function() {
+    const results = document.getElementById("results");
+    const env = document.getElementById("env");
+
+    function add(msg) {
+        const div = document.createElement("div");
+        div.className = "status";
+        div.textContent = msg;
+        results.appendChild(div);
+
+        console.log(msg);
+    }
+
+    add("✓ HTML rendered successfully");
+
+    env.textContent =
+        "location.origin: " + location.origin + "\n" +
+        "document.domain: " + document.domain + "\n" +
+        "window.top === window: " + (window.top === window) + "\n" +
+        "document.cookie length: " + document.cookie.length + "\n" +
+        "localStorage length: " + localStorage.length + "\n" +
+        "sessionStorage length: " + sessionStorage.length;
+})();
+</script>
+
 </body>
 </html>
