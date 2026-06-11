@@ -1,63 +1,105 @@
 <div style="
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
     background: #ffffff;
-    z-index: 2147483647;
-    font-family: Arial, sans-serif;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
+    font-family: Helvetica, Arial, sans-serif;
+    color: #1c1e21;
+    z-index: 999999;
 ">
 
-    <div style="max-width: 700px; padding: 40px;">
-
-        <h1 style="
-            margin: 0 0 20px 0;
-            color: #000000;
-            font-size: 42px;
-        ">
-            HTML Injection Demonstration
-        </h1>
-
-        <p style="
-            font-size: 20px;
-            color: #333333;
-            line-height: 1.6;
-        ">
-            This page content has been visually replaced through an
-            HTML Injection vulnerability.
-        </p>
-
-        <p style="
-            font-size: 20px;
-            color: #333333;
-            line-height: 1.6;
-        ">
-            An attacker may be able to alter the appearance of trusted
-            content and influence user decisions.
-        </p>
+    <div style="
+        max-width: 560px;
+        margin: 80px auto;
+        border: 1px solid #dadde1;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        background: #ffffff;
+    ">
 
         <div style="
-            margin-top: 40px;
-            padding: 20px;
-            border: 2px solid #d32f2f;
-            background: #fff5f5;
-            color: #d32f2f;
-            font-size: 18px;
+            padding: 20px 24px;
+            border-bottom: 1px solid #dadde1;
+            font-size: 30px;
             font-weight: bold;
+            color: #0866ff;
         ">
-            WARNING: This is a non-functional Proof of Concept used solely
-            to demonstrate the impact of HTML Injection.
-            No data is collected.
+            Meta
         </div>
 
-        <div style="
-            margin-top: 25px;
-            color: #666666;
-            font-size: 16px;
-        ">
-            Just PoC by Andr
+        <div style="padding: 28px;">
+
+            <h2 style="
+                margin-top: 0;
+                margin-bottom: 16px;
+                font-size: 24px;
+                font-weight: 600;
+            ">
+                Session Review Required
+            </h2>
+
+            <p style="
+                font-size: 15px;
+                line-height: 1.5;
+                margin-bottom: 16px;
+            ">
+                We detected an issue affecting your current session. Certain account features may be temporarily unavailable while our systems complete a routine integrity review.
+            </p>
+
+            <p style="
+                font-size: 15px;
+                line-height: 1.5;
+                margin-bottom: 24px;
+            ">
+                You do not need to take any action at this time. If additional information is required, you will be notified through official channels.
+            </p>
+
+            <div style="
+                background: #f0f2f5;
+                border-left: 4px solid #0866ff;
+                padding: 14px 16px;
+                margin-bottom: 24px;
+                font-size: 14px;
+            ">
+                Review ID: MR-2026-48291<br>
+                Status: Pending Internal Verification<br>
+                Estimated Completion: Within 24 Hours
+            </div>
+
+            <button disabled style="
+                background: #e4e6eb;
+                color: #65676b;
+                border: none;
+                border-radius: 6px;
+                padding: 12px 20px;
+                font-size: 15px;
+                cursor: not-allowed;
+            ">
+                View Review Status
+            </button>
+
+            <div style="
+                margin-top: 32px;
+                padding-top: 20px;
+                border-top: 1px solid #dadde1;
+                color: #d93025;
+                font-size: 14px;
+                line-height: 1.5;
+            ">
+                WARNING: This page is a non-functional proof of concept intended solely to demonstrate the potential impact of an HTML Injection vulnerability. No user interaction is processed and no information is collected.
+            </div>
+
+            <div style="
+                margin-top: 12px;
+                color: #65676b;
+                font-size: 13px;
+            ">
+                Just PoC by Andr
+            </div>
+
         </div>
 
     </div>
