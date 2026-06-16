@@ -1,36 +1,48 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Artifact Test</title>
-</head>
-<body>
-    <h1>Loading...</h1>
+<script>
+(async () => {
+    try {
+        console.log("START");
 
-    <script>
-    fetch("https://webhook.site/d301aa6c-b9b8-4cdd-8f8b-d221f0a255c9", {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            timestamp: new Date().toISOString(),
-            userAgent: navigator.userAgent,
-            language: navigator.language,
-            url: location.href,
-            referrer: document.referrer,
-            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            screen: `${screen.width}x${screen.height}`
-        })
-    })
-    .then(() => {
+        const res = await fetch(
+            "https://webhook.site/45b8e499-1449-40b4-a419-48574bcb1793",
+            {
+                method: "POST",
+                mode: "cors",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    test: "meta_artifact"
+                })
+            }
+        );
+
+        console.log(
+            "STATUS:",
+            res.status
+        );
+
+        console.log(
+            "TYPE:",
+            res.type
+        );
+
+        console.log(
+            "OK:",
+            res.ok
+        );
+
         document.body.innerHTML =
-            "<h2>Test completed.</h2>";
-    })
-    .catch(err => {
+            "<h1>SUCCESS</h1>";
+
+    } catch (e) {
+
+        console.error(e);
+
         document.body.innerHTML =
-            "<h2>Error: " + err + "</h2>";
-    });
-    </script>
-</body>
-</html>
+            "<h1>ERROR: " +
+            e +
+            "</h1>";
+    }
+})();
+</script>
